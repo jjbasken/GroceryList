@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block head %}
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+{% endblock %}
+{% block body %}
+<header>
+    <h1>GroceryList</h1>
+    <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+</header>
+
+<div class="add-bar">
+    <input type="text" id="item-input" placeholder="Add item..." autocomplete="off">
+    <select id="section-select">
+        <option value="now">Now</option>
+        <option value="later">Later</option>
+    </select>
+    <button id="add-btn" aria-label="Add item">+</button>
+</div>
+
+<main>
+    <section id="section-now">
+        <h2>Need Now (<span class="count">0</span>)</h2>
+        <ul class="item-list"></ul>
+    </section>
+
+    <section id="section-later">
+        <h2>Need Later (<span class="count">0</span>)</h2>
+        <ul class="item-list"></ul>
+    </section>
+</main>
+
+<div class="bottom-actions">
+    <button id="clear-bought-btn">Clear bought items</button>
+</div>
+{% endblock %}

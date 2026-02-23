@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="auth-container">
+    <h1>GroceryList</h1>
+    <p class="subtitle">Create your account</p>
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    <div class="flash">{{ messages[0] }}</div>
+    {% endif %}
+    {% endwith %}
+    <form method="POST" action="{{ url_for('register') }}">
+        <input type="text" name="username" placeholder="Username" autocomplete="username" required autofocus>
+        <input type="password" name="password" placeholder="Password" autocomplete="new-password" required>
+        <button type="submit">Create account</button>
+    </form>
+    <p class="auth-link"><a href="{{ url_for('login') }}">Already have an account? Log in</a></p>
+</div>
+{% endblock %}
