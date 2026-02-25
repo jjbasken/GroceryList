@@ -86,6 +86,16 @@ body {
 
 .auth-container button:hover { background: var(--accent-hover); }
 
+.remember-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    text-align: left;
+}
+
 .auth-link { margin-top: 16px; }
 .auth-link a { color: var(--accent); text-decoration: none; }
 

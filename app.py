@@ -3,6 +3,7 @@ import queue
 import sqlite3
 import threading
 import time
+from datetime import timedelta
 from functools import wraps
 
 import bcrypt
@@ -23,6 +24,7 @@ import config
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
+app.permanent_session_lifetime = timedelta(days=30)
 
 # SSE subscribers: list of queue.Queue objects
 subscribers = []
@@ -169,6 +171,7 @@ def login():
         if user["is_active"] != 1:
             flash("Your account has been disabled.")
             return render_template("login.html"), 401
+        session.permanent = request.form.get("remember_me") == "on"
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         session["role"] = user["role"]
