@@ -1,13 +1,18 @@
 services:
   web:
     build: .
-    ports:
-      - "5000:5000"
     volumes:
       - grocery-data:/data
     environment:
-      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - SECRET_KEY=${SECRET_KEY}
       - DATABASE=/data/grocery.db
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - web
     restart: unless-stopped
 
 volumes:
