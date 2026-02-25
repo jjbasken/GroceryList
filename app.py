@@ -56,6 +56,17 @@ def init_db():
     db.close()
 
 
+def upgrade_db():
+    db = sqlite3.connect(config.DATABASE)
+    cols = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+    if 'role' not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+    if 'is_active' not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    db.commit()
+    db.close()
+
+
 def has_users():
     db = get_db()
     return db.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
@@ -70,6 +81,17 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        if session.get("role") != "admin":
+            return redirect(url_for("index"))
         return f(*args, **kwargs)
     return decorated
 
@@ -116,9 +138,10 @@ def register():
     db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pw_hash))
     db.commit()
 
-    user = db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    user = db.execute("SELECT id, role FROM users WHERE username = ?", (username,)).fetchone()
     session["user_id"] = user["id"]
     session["username"] = username
+    session["role"] = user["role"]
     return redirect(url_for("index"))
 
 
@@ -137,8 +160,12 @@ def login():
     user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
 
     if user and bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        if user["is_active"] != 1:
+            flash("Your account has been disabled.")
+            return render_template("login.html"), 401
         session["user_id"] = user["id"]
         session["username"] = user["username"]
+        session["role"] = user["role"]
         return redirect(url_for("index"))
 
     flash("Invalid username or password.")
@@ -160,7 +187,8 @@ def logout():
 def index():
     if not has_users():
         return redirect(url_for("register"))
-    return render_template("list.html", username=session["username"])
+    return render_template("list.html", username=session["username"],
+                           is_admin=(session.get("role") == "admin"))
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +285,43 @@ def clear_bought():
 
 
 # ---------------------------------------------------------------------------
+# Admin routes
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/users")
+@admin_required
+def admin_users():
+    db = get_db()
+    users = db.execute("SELECT id, username, role, is_active FROM users ORDER BY id").fetchall()
+    return render_template("admin.html", users=users)
+
+
+@app.route("/admin/users/<int:user_id>/disable", methods=["POST"])
+@admin_required
+def admin_disable_user(user_id):
+    if user_id == session["user_id"]:
+        flash("You cannot disable your own account.")
+        return redirect(url_for("admin_users"))
+    db = get_db()
+    db.execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (user_id,))
+    db.commit()
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
+@admin_required
+def admin_delete_user(user_id):
+    if user_id == session["user_id"]:
+        flash("You cannot delete your own account.")
+        return redirect(url_for("admin_users"))
+    db = get_db()
+    db.execute("UPDATE items SET added_by = NULL WHERE added_by = ?", (user_id,))
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.commit()
+    return redirect(url_for("admin_users"))
+
+
+# ---------------------------------------------------------------------------
 # SSE stream
 # ---------------------------------------------------------------------------
 
@@ -290,6 +355,7 @@ def stream():
 
 with app.app_context():
     init_db()
+    upgrade_db()
 
 
 if __name__ == "__main__":

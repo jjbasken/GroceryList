@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block body %}
+<header>
+    <h1>Admin Panel</h1>
+    <a href="{{ url_for('index') }}" class="logout-btn">Back to list</a>
+</header>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <div class="admin-flash-container">
+      {% for msg in messages %}
+        <div class="flash">{{ msg }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+
+<main class="admin-main">
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>{{ user.username }}</td>
+                <td>{{ user.role }}</td>
+                <td>{{ "Active" if user.is_active else "Disabled" }}</td>
+                <td class="admin-actions">
+                    {% if user.id != session.user_id %}
+                    <form method="post" action="{{ url_for('admin_disable_user', user_id=user.id) }}">
+                        <button type="submit" class="admin-action-btn {{ 'btn-warn' if user.is_active else 'btn-ok' }}">
+                            {{ "Disable" if user.is_active else "Enable" }}
+                        </button>
+                    </form>
+                    <form method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}"
+                          onsubmit="return confirm('Delete user {{ user.username }}? This cannot be undone.')">
+                        <button type="submit" class="admin-action-btn btn-danger">Delete</button>
+                    </form>
+                    {% else %}
+                    <span class="admin-self-label">(you)</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</main>
+{% endblock %}

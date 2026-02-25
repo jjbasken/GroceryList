@@ -5,7 +5,12 @@
 {% block body %}
 <header>
     <h1>GroceryList</h1>
-    <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+    <div class="header-actions">
+        {% if is_admin %}
+        <a href="{{ url_for('admin_users') }}" class="admin-btn">Admin</a>
+        {% endif %}
+        <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+    </div>
 </header>
 
 <div class="add-bar">

@@ -285,3 +285,87 @@ section h2 {
     color: var(--text-muted);
     font-size: 0.9rem;
 }
+
+/* ---- Header actions group ---- */
+.header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* ---- Admin button ---- */
+.admin-btn {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+/* ---- Admin page ---- */
+.admin-flash-container {
+    padding: 12px 16px 0;
+}
+
+.admin-main {
+    padding: 16px;
+    overflow-x: auto;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+
+.admin-table th,
+.admin-table td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.admin-table th {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.admin-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.admin-action-btn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg2);
+    color: var(--text);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.admin-action-btn.btn-warn {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.admin-action-btn.btn-ok {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.admin-action-btn.btn-danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+}
+
+.admin-self-label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
