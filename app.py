@@ -63,6 +63,8 @@ def upgrade_db():
         db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
     if 'is_active' not in cols:
         db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if 'must_change_password' not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
     db.commit()
     db.close()
 
@@ -119,6 +121,10 @@ def broadcast(event_type, data=None):
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    # Only accessible for initial setup (no users yet)
+    if has_users():
+        return redirect(url_for("login"))
+
     if request.method == "GET":
         return render_template("register.html")
 
@@ -129,19 +135,19 @@ def register():
         flash("Username and password are required.")
         return render_template("register.html"), 400
 
-    db = get_db()
-    if db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone():
-        flash("Username already taken.")
-        return render_template("register.html"), 400
-
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pw_hash))
+    db = get_db()
+    db.execute(
+        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
+        (username, pw_hash),
+    )
     db.commit()
 
     user = db.execute("SELECT id, role FROM users WHERE username = ?", (username,)).fetchone()
     session["user_id"] = user["id"]
     session["username"] = username
     session["role"] = user["role"]
+    session["must_change_password"] = False
     return redirect(url_for("index"))
 
 
@@ -166,6 +172,9 @@ def login():
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         session["role"] = user["role"]
+        session["must_change_password"] = bool(user["must_change_password"])
+        if user["must_change_password"]:
+            return redirect(url_for("change_password"))
         return redirect(url_for("index"))
 
     flash("Invalid username or password.")
@@ -187,6 +196,8 @@ def logout():
 def index():
     if not has_users():
         return redirect(url_for("register"))
+    if session.get("must_change_password"):
+        return redirect(url_for("change_password"))
     return render_template("list.html", username=session["username"],
                            is_admin=(session.get("role") == "admin"))
 
@@ -285,6 +296,37 @@ def clear_bought():
 
 
 # ---------------------------------------------------------------------------
+# Change password (forced after admin creates/resets)
+# ---------------------------------------------------------------------------
+
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    if request.method == "GET":
+        return render_template("change_password.html")
+
+    new_password = request.form.get("password", "").strip()
+    confirm = request.form.get("confirm", "").strip()
+
+    if not new_password:
+        flash("Password is required.")
+        return render_template("change_password.html"), 400
+    if new_password != confirm:
+        flash("Passwords do not match.")
+        return render_template("change_password.html"), 400
+
+    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    db = get_db()
+    db.execute(
+        "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+        (pw_hash, session["user_id"]),
+    )
+    db.commit()
+    session["must_change_password"] = False
+    return redirect(url_for("index"))
+
+
+# ---------------------------------------------------------------------------
 # Admin routes
 # ---------------------------------------------------------------------------
 
@@ -292,8 +334,32 @@ def clear_bought():
 @admin_required
 def admin_users():
     db = get_db()
-    users = db.execute("SELECT id, username, role, is_active FROM users ORDER BY id").fetchall()
+    users = db.execute("SELECT id, username, role, is_active, must_change_password FROM users ORDER BY id").fetchall()
     return render_template("admin.html", users=users)
+
+
+@app.route("/admin/users/create", methods=["POST"])
+@admin_required
+def admin_create_user():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "").strip()
+
+    if not username or not password:
+        flash("Username and password are required.")
+        return redirect(url_for("admin_users"))
+
+    db = get_db()
+    if db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone():
+        flash("Username already taken.")
+        return redirect(url_for("admin_users"))
+
+    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    db.execute(
+        "INSERT INTO users (username, password_hash, must_change_password) VALUES (?, ?, 1)",
+        (username, pw_hash),
+    )
+    db.commit()
+    return redirect(url_for("admin_users"))
 
 
 @app.route("/admin/users/<int:user_id>/disable", methods=["POST"])
@@ -304,6 +370,31 @@ def admin_disable_user(user_id):
         return redirect(url_for("admin_users"))
     db = get_db()
     db.execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (user_id,))
+    db.commit()
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/<int:user_id>/reset-password", methods=["GET", "POST"])
+@admin_required
+def admin_reset_password(user_id):
+    db = get_db()
+    user = db.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return redirect(url_for("admin_users"))
+
+    if request.method == "GET":
+        return render_template("admin_reset_password.html", user=user)
+
+    new_password = request.form.get("password", "").strip()
+    if not new_password:
+        flash("Password is required.")
+        return render_template("admin_reset_password.html", user=user), 400
+
+    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    db.execute(
+        "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
+        (pw_hash, user_id),
+    )
     db.commit()
     return redirect(url_for("admin_users"))
 

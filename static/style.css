@@ -369,3 +369,44 @@ section h2 {
     font-size: 0.85rem;
     color: var(--text-muted);
 }
+
+.admin-section {
+    margin-bottom: 32px;
+}
+
+.admin-section-title {
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+
+.admin-create-form {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.admin-create-form input {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    background: var(--bg2);
+    color: var(--text);
+    min-width: 160px;
+}
+
+.admin-pw-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    margin-left: 6px;
+    vertical-align: middle;
+}
