@@ -24,7 +24,7 @@ import config
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
-app.permanent_session_lifetime = timedelta(days=30)
+app.permanent_session_lifetime = timedelta(days=36500)
 
 # SSE subscribers: list of queue.Queue objects
 subscribers = []
