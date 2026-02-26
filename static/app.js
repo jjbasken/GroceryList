@@ -77,15 +77,7 @@
         moveBtn.setAttribute("aria-label", moveBtn.title);
         moveBtn.addEventListener("click", () => moveItem(item.id));
 
-        const delBtn = document.createElement("button");
-        delBtn.className = "delete-btn";
-        delBtn.textContent = "\u2715";
-        delBtn.title = "Delete";
-        delBtn.setAttribute("aria-label", "Delete " + item.name);
-        delBtn.addEventListener("click", () => deleteItem(item.id));
-
         actions.appendChild(moveBtn);
-        actions.appendChild(delBtn);
 
         li.appendChild(cb);
         li.appendChild(name);
