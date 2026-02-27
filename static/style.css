@@ -288,6 +288,13 @@ section h2 {
     color: var(--danger);
 }
 
+/* ---- Bought section ---- */
+#section-bought {
+    border-top: 2px solid var(--border);
+    margin-top: 8px;
+    opacity: 0.75;
+}
+
 /* ---- Empty state ---- */
 .empty-msg {
     text-align: center;

@@ -9,8 +9,11 @@
 
     const sectionNowList = document.querySelector("#section-now .item-list");
     const sectionLaterList = document.querySelector("#section-later .item-list");
+    const sectionBoughtList = document.querySelector("#section-bought .item-list");
     const sectionNowCount = document.querySelector("#section-now .count");
     const sectionLaterCount = document.querySelector("#section-later .count");
+    const sectionBoughtCount = document.querySelector("#section-bought .count");
+    const sectionBoughtEl = document.getElementById("section-bought");
 
     // ---- API helpers ----
 
@@ -27,14 +30,17 @@
     // ---- Render ----
 
     function renderItems(items) {
-        const now = items.filter(i => i.section === "now");
-        const later = items.filter(i => i.section === "later");
+        const now = items.filter(i => i.section === "now" && !i.is_bought);
+        const later = items.filter(i => i.section === "later" && !i.is_bought);
+        const bought = items.filter(i => i.is_bought);
 
-        sectionNowCount.textContent = now.filter(i => !i.is_bought).length;
-        sectionLaterCount.textContent = later.filter(i => !i.is_bought).length;
+        sectionNowCount.textContent = now.length;
+        sectionLaterCount.textContent = later.length;
+        sectionBoughtCount.textContent = bought.length;
 
         sectionNowList.innerHTML = "";
         sectionLaterList.innerHTML = "";
+        sectionBoughtList.innerHTML = "";
 
         if (now.length === 0) {
             sectionNowList.innerHTML = '<li class="empty-msg">No items</li>';
@@ -47,6 +53,9 @@
         } else {
             later.forEach(i => sectionLaterList.appendChild(createItemEl(i)));
         }
+
+        sectionBoughtEl.style.display = bought.length === 0 ? "none" : "";
+        bought.forEach(i => sectionBoughtList.appendChild(createItemEl(i)));
     }
 
     function createItemEl(item) {
@@ -103,22 +112,27 @@
             method: "POST",
             body: JSON.stringify({ name, section }),
         });
+        loadItems();
     }
 
     async function toggleItem(id) {
         await api("/api/items/" + id + "/toggle", { method: "POST" });
+        loadItems();
     }
 
     async function moveItem(id) {
         await api("/api/items/" + id + "/move", { method: "POST" });
+        loadItems();
     }
 
     async function deleteItem(id) {
         await api("/api/items/" + id, { method: "DELETE" });
+        loadItems();
     }
 
     async function clearBought() {
         await api("/api/items/clear-bought", { method: "POST" });
+        loadItems();
     }
 
     // ---- Events ----
