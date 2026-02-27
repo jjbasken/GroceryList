@@ -419,9 +419,9 @@ def admin_delete_user(user_id):
 # PWA manifest
 # ---------------------------------------------------------------------------
 
-@app.route("/manifest.json")
+@app.route("/manifest.webmanifest")
 def manifest():
-    return app.send_static_file("manifest.json"), 200, {"Content-Type": "application/manifest+json"}
+    return app.send_static_file("manifest.webmanifest"), 200, {"Content-Type": "application/manifest+json"}
 
 
 # ---------------------------------------------------------------------------
