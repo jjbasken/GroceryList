@@ -2,7 +2,7 @@ services:
   web:
     build: .
     volumes:
-      - grocery-data:/data
+      - ./data:/data
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - DATABASE=/data/grocery.db
@@ -14,6 +14,3 @@ services:
     depends_on:
       - web
     restart: unless-stopped
-
-volumes:
-  grocery-data:
