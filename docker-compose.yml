@@ -21,3 +21,5 @@ services:
       web:
         condition: service_healthy
     restart: unless-stopped
+    environment:
+      - TUNNEL_ORIGIN_SERVER_NAME=grocerylist.basken.net
