@@ -30,5 +30,5 @@ services:
     networks:
       - grocery-net
 
-  networks:
-    grocery-net:
+networks:
+  grocery-net:
