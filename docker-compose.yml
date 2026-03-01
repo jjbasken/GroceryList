@@ -7,10 +7,17 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - DATABASE=/data/grocery.db
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/login')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   tunnel:
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     restart: unless-stopped
