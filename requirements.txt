@@ -3,4 +3,4 @@ bcrypt==4.3.0
 gunicorn==23.0.0
 gevent==24.11.1
 flask-wtf==1.2.2
-flask-limiter==3.9.3
+flask-limiter==4.1.1
