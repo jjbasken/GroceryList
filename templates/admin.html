@@ -19,6 +19,7 @@
     <section class="admin-section">
         <h2 class="admin-section-title">Create User</h2>
         <form method="post" action="{{ url_for('admin_create_user') }}" class="admin-create-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="username" placeholder="Username" autocomplete="off" required>
             <input type="password" name="password" placeholder="Temporary password" autocomplete="new-password" required>
             <button type="submit" class="admin-action-btn btn-ok">Create</button>
@@ -51,12 +52,14 @@
                         {% if user.id != session.user_id %}
                         <a href="{{ url_for('admin_reset_password', user_id=user.id) }}" class="admin-action-btn">Reset password</a>
                         <form method="post" action="{{ url_for('admin_disable_user', user_id=user.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="admin-action-btn {{ 'btn-warn' if user.is_active else 'btn-ok' }}">
                                 {{ "Disable" if user.is_active else "Enable" }}
                             </button>
                         </form>
                         <form method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}"
                               onsubmit="return confirm('Delete user {{ user.username }}? This cannot be undone.')">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="admin-action-btn btn-danger">Delete</button>
                         </form>
                         {% else %}

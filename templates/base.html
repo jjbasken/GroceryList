@@ -7,6 +7,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#1a7f37" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#238636" media="(prefers-color-scheme: dark)">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>GroceryList</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="manifest" href="/manifest.webmanifest">

@@ -19,12 +19,27 @@ from flask import (
     session,
     url_for,
 )
+from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 import config
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
 app.permanent_session_lifetime = timedelta(days=36500)
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+csrf = CSRFProtect(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 # SSE subscribers: list of queue.Queue objects
 subscribers = []
@@ -49,6 +64,14 @@ def close_db(exc):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
 def init_db():
@@ -84,6 +107,13 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_id" not in session:
+            return redirect(url_for("login"))
+        # Re-validate is_active on every request (cheap indexed lookup)
+        user = get_db().execute(
+            "SELECT is_active FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+        if not user or user["is_active"] != 1:
+            session.clear()
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
@@ -154,6 +184,7 @@ def register():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("20 per minute")
 def login():
     if not has_users():
         return redirect(url_for("register"))
@@ -171,6 +202,7 @@ def login():
         if user["is_active"] != 1:
             flash("Your account has been disabled.")
             return render_template("login.html"), 401
+        session.clear()                            # prevent session fixation
         session.permanent = request.form.get("remember_me") == "on"
         session["user_id"] = user["id"]
         session["username"] = user["username"]

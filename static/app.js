@@ -2,6 +2,8 @@
 (function () {
     "use strict";
 
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
     const itemInput = document.getElementById("item-input");
     const sectionSelect = document.getElementById("section-select");
     const addBtn = document.getElementById("add-btn");
@@ -18,7 +20,7 @@
     // ---- API helpers ----
 
     async function api(url, opts = {}) {
-        opts.headers = { "Content-Type": "application/json", ...opts.headers };
+        opts.headers = { "Content-Type": "application/json", "X-CSRFToken": csrfToken, ...opts.headers };
         const res = await fetch(url, opts);
         if (res.status === 401) {
             window.location.href = "/login";

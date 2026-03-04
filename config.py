@@ -1,4 +1,4 @@
 import os
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
+SECRET_KEY = os.environ["SECRET_KEY"]   # raises KeyError if unset; no silent fallback
 DATABASE = os.environ.get("DATABASE", "/data/grocery.db")
