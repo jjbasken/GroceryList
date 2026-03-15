@@ -83,6 +83,8 @@ def init_db():
 
 def upgrade_db():
     db = sqlite3.connect(config.DATABASE)
+
+    # --- User column upgrades (legacy) ---
     cols = {row[1] for row in db.execute("PRAGMA table_info(users)")}
     if 'role' not in cols:
         db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
@@ -90,6 +92,45 @@ def upgrade_db():
         db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if 'must_change_password' not in cols:
         db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+
+    # --- Lists table (old DBs won't have it) ---
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'lists' not in tables:
+        db.execute("""
+            CREATE TABLE lists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+    # Ensure at least one list exists
+    if db.execute("SELECT COUNT(*) FROM lists").fetchone()[0] == 0:
+        db.execute("INSERT INTO lists (name) VALUES ('Groceries')")
+    db.commit()
+
+    # --- Item column upgrades ---
+    item_cols = {row[1] for row in db.execute("PRAGMA table_info(items)")}
+    if 'quantity' not in item_cols:
+        db.execute("ALTER TABLE items ADD COLUMN quantity TEXT")
+    if 'notes' not in item_cols:
+        db.execute("ALTER TABLE items ADD COLUMN notes TEXT")
+    if 'list_id' not in item_cols:
+        db.execute("ALTER TABLE items ADD COLUMN list_id INTEGER REFERENCES lists(id)")
+        db.execute("UPDATE items SET list_id = (SELECT id FROM lists ORDER BY id LIMIT 1) WHERE list_id IS NULL")
+
+    # --- Item name history table ---
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'item_name_history' not in tables:
+        db.execute("""
+            CREATE TABLE item_name_history (
+                name TEXT PRIMARY KEY COLLATE NOCASE,
+                last_used TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        db.execute("INSERT OR IGNORE INTO item_name_history (name) SELECT DISTINCT name FROM items")
+
     db.commit()
     db.close()
 
@@ -241,14 +282,72 @@ def index():
 # API routes
 # ---------------------------------------------------------------------------
 
+@app.route("/api/lists")
+@login_required
+def get_lists():
+    db = get_db()
+    rows = db.execute("SELECT id, name FROM lists ORDER BY id").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/lists", methods=["POST"])
+@login_required
+def create_list():
+    data = request.get_json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if len(name) > 100:
+        return jsonify({"error": "Name too long"}), 400
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO lists (name, created_by) VALUES (?, ?)",
+        (name, session["user_id"]),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid, "name": name}), 201
+
+
+@app.route("/api/lists/<int:list_id>", methods=["DELETE"])
+@login_required
+def delete_list(list_id):
+    db = get_db()
+    count = db.execute("SELECT COUNT(*) FROM lists").fetchone()[0]
+    if count <= 1:
+        return jsonify({"error": "Cannot delete the last list"}), 400
+    db.execute("DELETE FROM items WHERE list_id = ?", (list_id,))
+    db.execute("DELETE FROM lists WHERE id = ?", (list_id,))
+    db.commit()
+    broadcast("update")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/items/history")
+@login_required
+def item_history():
+    db = get_db()
+    rows = db.execute(
+        "SELECT name FROM item_name_history ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    return jsonify([r["name"] for r in rows])
+
+
 @app.route("/api/items")
 @login_required
 def get_items():
+    list_id = request.args.get("list_id", type=int)
     db = get_db()
+    if list_id is None:
+        first = db.execute("SELECT id FROM lists ORDER BY id LIMIT 1").fetchone()
+        list_id = first["id"] if first else None
+    if list_id is None:
+        return jsonify([])
     rows = db.execute(
         "SELECT items.*, users.username AS added_by_name "
-        "FROM items JOIN users ON items.added_by = users.id "
-        "ORDER BY items.is_bought ASC, items.created_at DESC"
+        "FROM items LEFT JOIN users ON items.added_by = users.id "
+        "WHERE items.list_id = ? "
+        "ORDER BY items.is_bought ASC, items.created_at DESC",
+        (list_id,),
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -259,6 +358,9 @@ def add_item():
     data = request.get_json()
     name = (data.get("name") or "").strip()
     section = data.get("section", "now")
+    quantity = (data.get("quantity") or "").strip() or None
+    notes = (data.get("notes") or "").strip() or None
+    list_id = data.get("list_id")
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
@@ -266,15 +368,24 @@ def add_item():
         return jsonify({"error": "Section must be 'now' or 'later'"}), 400
 
     db = get_db()
+    if list_id is None:
+        first = db.execute("SELECT id FROM lists ORDER BY id LIMIT 1").fetchone()
+        list_id = first["id"] if first else None
+
     cur = db.execute(
-        "INSERT INTO items (name, section, added_by) VALUES (?, ?, ?)",
-        (name, section, session["user_id"]),
+        "INSERT INTO items (name, section, quantity, notes, list_id, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, section, quantity, notes, list_id, session["user_id"]),
+    )
+    db.execute(
+        "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
+        "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
+        (name,),
     )
     db.commit()
 
     item = db.execute(
         "SELECT items.*, users.username AS added_by_name "
-        "FROM items JOIN users ON items.added_by = users.id "
+        "FROM items LEFT JOIN users ON items.added_by = users.id "
         "WHERE items.id = ?",
         (cur.lastrowid,),
     ).fetchone()
@@ -323,8 +434,13 @@ def delete_item(item_id):
 @app.route("/api/items/clear-bought", methods=["POST"])
 @login_required
 def clear_bought():
+    data = request.get_json() or {}
+    list_id = data.get("list_id")
     db = get_db()
-    db.execute("DELETE FROM items WHERE is_bought = 1")
+    if list_id:
+        db.execute("DELETE FROM items WHERE is_bought = 1 AND list_id = ?", (list_id,))
+    else:
+        db.execute("DELETE FROM items WHERE is_bought = 1")
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})

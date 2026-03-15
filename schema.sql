@@ -7,12 +7,27 @@ CREATE TABLE IF NOT EXISTS users (
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     section TEXT NOT NULL CHECK (section IN ('now', 'later')),
     is_bought INTEGER DEFAULT 0,
+    quantity TEXT,
+    notes TEXT,
+    list_id INTEGER REFERENCES lists(id),
     added_by INTEGER REFERENCES users(id),
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS item_name_history (
+    name TEXT PRIMARY KEY COLLATE NOCASE,
+    last_used TEXT DEFAULT (datetime('now'))
 );
