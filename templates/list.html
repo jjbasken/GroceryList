@@ -9,28 +9,32 @@
         {% if is_admin %}
         <a href="{{ url_for('admin_users') }}" class="admin-btn">Admin</a>
         {% endif %}
+        <button id="toggle-controls-btn" class="toggle-controls-btn" aria-label="Hide controls" title="Hide controls">
+            <svg id="toggle-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4,6 8,10 12,6"/></svg>
+        </button>
         <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
     </div>
 </header>
 
-<div class="list-bar">
-    <select id="list-select" class="list-select" aria-label="Select list"></select>
-    <button id="new-list-btn" class="new-list-btn" aria-label="New list" title="New list">+</button>
-    <button id="delete-list-btn" class="delete-list-btn" aria-label="Delete list" title="Delete list">&#x2715;</button>
-</div>
-
-<div class="add-bar">
-    <div class="item-input-wrap">
-        <input type="text" id="item-input" placeholder="Add item..." autocomplete="off" enterkeyhint="go">
-        <div id="item-suggestions" class="suggestions-dropdown" hidden></div>
+<div id="top-controls">
+    <div class="list-bar">
+        <select id="list-select" class="list-select" aria-label="Select list"></select>
+        <button id="new-list-btn" class="new-list-btn" aria-label="New list" title="New list">+</button>
+        <button id="delete-list-btn" class="delete-list-btn" aria-label="Delete list" title="Delete list">&#x2715;</button>
     </div>
-    <input type="text" id="qty-input" class="qty-input" placeholder="Qty" aria-label="Quantity">
-    <select id="section-select">
-        <option value="now">Now</option>
-        <option value="later">Later</option>
-    </select>
-    <button id="add-btn" aria-label="Add item">+</button>
-    <input type="text" id="notes-input" class="notes-input" placeholder="Notes (optional)" aria-label="Notes">
+    <div class="add-bar">
+        <div class="item-input-wrap">
+            <input type="text" id="item-input" placeholder="Add item..." autocomplete="off" enterkeyhint="go">
+            <div id="item-suggestions" class="suggestions-dropdown" hidden></div>
+        </div>
+        <input type="text" id="qty-input" class="qty-input" placeholder="Qty" aria-label="Quantity">
+        <select id="section-select">
+            <option value="now">Now</option>
+            <option value="later">Later</option>
+        </select>
+        <button id="add-btn" aria-label="Add item">+</button>
+        <input type="text" id="notes-input" class="notes-input" placeholder="Notes (optional)" aria-label="Notes">
+    </div>
 </div>
 
 <main>

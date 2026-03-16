@@ -4,6 +4,24 @@
 
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
+    // ---- Toggle controls ----
+    const toggleControlsBtn = document.getElementById("toggle-controls-btn");
+    const CONTROLS_KEY = "controls-collapsed";
+
+    function applyControlsState(collapsed) {
+        document.body.classList.toggle("controls-collapsed", collapsed);
+        toggleControlsBtn.setAttribute("aria-label", collapsed ? "Show controls" : "Hide controls");
+        toggleControlsBtn.title = collapsed ? "Show controls" : "Hide controls";
+    }
+
+    toggleControlsBtn.addEventListener("click", () => {
+        const collapsed = !document.body.classList.contains("controls-collapsed");
+        localStorage.setItem(CONTROLS_KEY, collapsed ? "1" : "0");
+        applyControlsState(collapsed);
+    });
+
+    applyControlsState(localStorage.getItem(CONTROLS_KEY) === "1");
+
     const listSelect = document.getElementById("list-select");
     const newListBtn = document.getElementById("new-list-btn");
     const deleteListBtn = document.getElementById("delete-list-btn");
