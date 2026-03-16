@@ -13,7 +13,7 @@
     const sectionSelect = document.getElementById("section-select");
     const addBtn = document.getElementById("add-btn");
     const clearBoughtBtn = document.getElementById("clear-bought-btn");
-    const itemSuggestions = document.getElementById("item-suggestions");
+    const suggestionsDropdown = document.getElementById("item-suggestions");
 
     const sectionNowList = document.querySelector("#section-now .item-list");
     const sectionLaterList = document.querySelector("#section-later .item-list");
@@ -236,15 +236,52 @@
 
     // ---- History (autocomplete) ----
 
+    let allHistory = [];
+
     async function loadHistory() {
         const names = await api("/api/items/history");
         if (!names) return;
-        itemSuggestions.innerHTML = "";
-        names.forEach(name => {
-            const opt = document.createElement("option");
-            opt.value = name;
-            itemSuggestions.appendChild(opt);
+        allHistory = names;
+    }
+
+    function showSuggestions(query) {
+        const q = query.trim().toLowerCase();
+        const matches = q ? allHistory.filter(n => n.toLowerCase().includes(q)) : [];
+        suggestionsDropdown.innerHTML = "";
+        if (matches.length === 0) {
+            suggestionsDropdown.hidden = true;
+            return;
+        }
+        matches.forEach(name => {
+            const row = document.createElement("div");
+            row.className = "suggestion-row";
+
+            const label = document.createElement("span");
+            label.className = "suggestion-label";
+            label.textContent = name;
+            label.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                itemInput.value = name;
+                suggestionsDropdown.hidden = true;
+            });
+
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "suggestion-remove";
+            removeBtn.textContent = "\u00D7";
+            removeBtn.title = "Remove from suggestions";
+            removeBtn.setAttribute("aria-label", "Remove " + name + " from suggestions");
+            removeBtn.addEventListener("mousedown", async (e) => {
+                e.preventDefault();
+                await api("/api/items/history/" + encodeURIComponent(name), { method: "DELETE" });
+                allHistory = allHistory.filter(n => n !== name);
+                showSuggestions(itemInput.value);
+            });
+
+            row.appendChild(label);
+            row.appendChild(removeBtn);
+            suggestionsDropdown.appendChild(row);
         });
+        suggestionsDropdown.hidden = false;
     }
 
     // ---- Events ----
@@ -257,8 +294,12 @@
     deleteListBtn.addEventListener("click", deleteList);
     addBtn.addEventListener("click", addItem);
     itemInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") addItem();
+        if (e.key === "Enter") { suggestionsDropdown.hidden = true; addItem(); }
+        if (e.key === "Escape") { suggestionsDropdown.hidden = true; }
     });
+    itemInput.addEventListener("input", () => showSuggestions(itemInput.value));
+    itemInput.addEventListener("focus", () => showSuggestions(itemInput.value));
+    itemInput.addEventListener("blur", () => { suggestionsDropdown.hidden = true; });
     clearBoughtBtn.addEventListener("click", clearBought);
 
     // ---- SSE ----

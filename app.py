@@ -332,6 +332,15 @@ def item_history():
     return jsonify([r["name"] for r in rows])
 
 
+@app.route("/api/items/history/<path:name>", methods=["DELETE"])
+@login_required
+def delete_history_item(name):
+    db = get_db()
+    db.execute("DELETE FROM item_name_history WHERE name = ? COLLATE NOCASE", (name,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/items")
 @login_required
 def get_items():
