@@ -31,3 +31,12 @@ CREATE TABLE IF NOT EXISTS item_name_history (
     name TEXT PRIMARY KEY COLLATE NOCASE,
     last_used TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    actor_id INTEGER REFERENCES users(id),
+    actor_username TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT
+);

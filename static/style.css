@@ -614,3 +614,21 @@ section h2 {
     margin-left: 6px;
     vertical-align: middle;
 }
+
+.admin-empty {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.audit-log-table .audit-time {
+    white-space: nowrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.audit-log-table code {
+    font-size: 0.8rem;
+    background: var(--bg2);
+    padding: 1px 5px;
+    border-radius: 3px;
+}

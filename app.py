@@ -131,6 +131,20 @@ def upgrade_db():
         """)
         db.execute("INSERT OR IGNORE INTO item_name_history (name) SELECT DISTINCT name FROM items")
 
+    # --- Audit log table ---
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'audit_log' not in tables:
+        db.execute("""
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT DEFAULT (datetime('now')),
+                actor_id INTEGER REFERENCES users(id),
+                actor_username TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT
+            )
+        """)
+
     db.commit()
     db.close()
 
@@ -189,6 +203,18 @@ def broadcast(event_type, data=None):
 
 
 # ---------------------------------------------------------------------------
+# Audit logging
+# ---------------------------------------------------------------------------
+
+def log_audit(action, detail=None):
+    db = get_db()
+    db.execute(
+        "INSERT INTO audit_log (actor_id, actor_username, action, detail) VALUES (?, ?, ?, ?)",
+        (session.get("user_id"), session.get("username", "system"), action, detail),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
 
@@ -215,13 +241,13 @@ def register():
         "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, pw_hash),
     )
-    db.commit()
-
     user = db.execute("SELECT id, role FROM users WHERE username = ?", (username,)).fetchone()
     session["user_id"] = user["id"]
     session["username"] = username
     session["role"] = user["role"]
     session["must_change_password"] = False
+    log_audit("user.register", f"Initial admin account '{username}' created")
+    db.commit()
     return redirect(url_for("index"))
 
 
@@ -316,8 +342,10 @@ def delete_list(list_id):
     count = db.execute("SELECT COUNT(*) FROM lists").fetchone()[0]
     if count <= 1:
         return jsonify({"error": "Cannot delete the last list"}), 400
+    lst = db.execute("SELECT name FROM lists WHERE id = ?", (list_id,)).fetchone()
     db.execute("DELETE FROM items WHERE list_id = ?", (list_id,))
     db.execute("DELETE FROM lists WHERE id = ?", (list_id,))
+    log_audit("list.delete", f"Deleted list '{lst['name'] if lst else list_id}'")
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
@@ -435,7 +463,9 @@ def move_item(item_id):
 @login_required
 def delete_item(item_id):
     db = get_db()
+    item = db.execute("SELECT name FROM items WHERE id = ?", (item_id,)).fetchone()
     db.execute("DELETE FROM items WHERE id = ?", (item_id,))
+    log_audit("item.delete", f"Deleted item '{item['name'] if item else item_id}'")
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
@@ -448,9 +478,12 @@ def clear_bought():
     list_id = data.get("list_id")
     db = get_db()
     if list_id:
+        lst = db.execute("SELECT name FROM lists WHERE id = ?", (list_id,)).fetchone()
         db.execute("DELETE FROM items WHERE is_bought = 1 AND list_id = ?", (list_id,))
+        log_audit("items.clear_bought", f"Cleared bought items from list '{lst['name'] if lst else list_id}'")
     else:
         db.execute("DELETE FROM items WHERE is_bought = 1")
+        log_audit("items.clear_bought", "Cleared all bought items")
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
@@ -496,7 +529,10 @@ def change_password():
 def admin_users():
     db = get_db()
     users = db.execute("SELECT id, username, role, is_active, must_change_password FROM users ORDER BY id").fetchall()
-    return render_template("admin.html", users=users)
+    logs = db.execute(
+        "SELECT timestamp, actor_username, action, detail FROM audit_log ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    return render_template("admin.html", users=users, logs=logs)
 
 
 @app.route("/admin/users/create", methods=["POST"])
@@ -519,6 +555,7 @@ def admin_create_user():
         "INSERT INTO users (username, password_hash, must_change_password) VALUES (?, ?, 1)",
         (username, pw_hash),
     )
+    log_audit("admin.user_create", f"Created user '{username}'")
     db.commit()
     return redirect(url_for("admin_users"))
 
@@ -530,7 +567,11 @@ def admin_disable_user(user_id):
         flash("You cannot disable your own account.")
         return redirect(url_for("admin_users"))
     db = get_db()
+    target = db.execute("SELECT username, is_active FROM users WHERE id = ?", (user_id,)).fetchone()
     db.execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (user_id,))
+    if target:
+        verb = "Disabled" if target["is_active"] == 1 else "Enabled"
+        log_audit("admin.user_toggle", f"{verb} user '{target['username']}'")
     db.commit()
     return redirect(url_for("admin_users"))
 
@@ -556,6 +597,7 @@ def admin_reset_password(user_id):
         "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
         (pw_hash, user_id),
     )
+    log_audit("admin.password_reset", f"Reset password for user '{user['username']}'")
     db.commit()
     return redirect(url_for("admin_users"))
 
@@ -567,8 +609,11 @@ def admin_delete_user(user_id):
         flash("You cannot delete your own account.")
         return redirect(url_for("admin_users"))
     db = get_db()
+    target = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
     db.execute("UPDATE items SET added_by = NULL WHERE added_by = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    if target:
+        log_audit("admin.user_delete", f"Deleted user '{target['username']}'")
     db.commit()
     return redirect(url_for("admin_users"))
 
