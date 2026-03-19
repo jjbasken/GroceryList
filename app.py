@@ -193,6 +193,7 @@ def broadcast(event_type, data=None):
 # ---------------------------------------------------------------------------
 
 @app.route("/register", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
 def register():
     # Only accessible for initial setup (no users yet)
     if has_users():
