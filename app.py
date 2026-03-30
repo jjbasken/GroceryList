@@ -31,13 +31,16 @@ app.permanent_session_lifetime = timedelta(days=36500)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = True
 
 csrf = CSRFProtect(app)
 
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=[],
+    default_limits=["200 per minute"],
+    # NOTE: memory:// storage only works correctly with --workers 1 (current Dockerfile setting).
+    # Switch to redis:// if worker count is ever increased.
     storage_uri="memory://",
 )
 
@@ -71,6 +74,10 @@ def set_security_headers(response):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'"
+    )
     return response
 
 
@@ -179,7 +186,13 @@ def admin_required(f):
     def decorated(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("login"))
-        if session.get("role") != "admin":
+        user = get_db().execute(
+            "SELECT is_active, role FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+        if not user or user["is_active"] != 1:
+            session.clear()
+            return redirect(url_for("login"))
+        if user["role"] != "admin":
             return redirect(url_for("index"))
         return f(*args, **kwargs)
     return decorated
@@ -234,6 +247,9 @@ def register():
     if not username or not password:
         flash("Username and password are required.")
         return render_template("register.html"), 400
+    if len(password) < 5:
+        flash("Password must be at least 5 characters.")
+        return render_template("register.html"), 400
 
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     db = get_db()
@@ -266,7 +282,12 @@ def login():
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
 
-    if user and bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+    # Always run bcrypt to prevent username enumeration via timing
+    dummy_hash = b"$2b$12$GhvMmNVjRW29ulnudl.LbuAnUtN/LRfe1JsBm1Vf3nGJM9XuQ.i51"
+    candidate_hash = user["password_hash"].encode() if user else dummy_hash
+    password_ok = bcrypt.checkpw(password.encode(), candidate_hash)
+
+    if user and password_ok:
         if user["is_active"] != 1:
             flash("Your account has been disabled.")
             return render_template("login.html"), 401
@@ -284,7 +305,7 @@ def login():
     return render_template("login.html"), 401
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     session.clear()
     return redirect(url_for("login"))
@@ -402,6 +423,12 @@ def add_item():
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
+    if len(name) > 200:
+        return jsonify({"error": "Name too long"}), 400
+    if quantity and len(quantity) > 50:
+        return jsonify({"error": "Quantity too long"}), 400
+    if notes and len(notes) > 500:
+        return jsonify({"error": "Notes too long"}), 400
     if section not in ("now", "later"):
         return jsonify({"error": "Section must be 'now' or 'later'"}), 400
 
@@ -505,6 +532,9 @@ def change_password():
     if not new_password:
         flash("Password is required.")
         return render_template("change_password.html"), 400
+    if len(new_password) < 5:
+        flash("Password must be at least 5 characters.")
+        return render_template("change_password.html"), 400
     if new_password != confirm:
         flash("Passwords do not match.")
         return render_template("change_password.html"), 400
@@ -543,6 +573,9 @@ def admin_create_user():
 
     if not username or not password:
         flash("Username and password are required.")
+        return redirect(url_for("admin_users"))
+    if len(password) < 5:
+        flash("Password must be at least 5 characters.")
         return redirect(url_for("admin_users"))
 
     db = get_db()
@@ -590,6 +623,9 @@ def admin_reset_password(user_id):
     new_password = request.form.get("password", "").strip()
     if not new_password:
         flash("Password is required.")
+        return render_template("admin_reset_password.html", user=user), 400
+    if len(new_password) < 5:
+        flash("Password must be at least 5 characters.")
         return render_template("admin_reset_password.html", user=user), 400
 
     pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()

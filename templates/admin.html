@@ -58,7 +58,7 @@
                             </button>
                         </form>
                         <form method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}"
-                              onsubmit="return confirm('Delete user {{ user.username }}? This cannot be undone.')">
+                              class="delete-user-form" data-username="{{ user.username }}">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="admin-action-btn btn-danger">Delete</button>
                         </form>
@@ -100,4 +100,7 @@
         {% endif %}
     </section>
 </main>
+{% block head %}
+<script src="{{ url_for('static', filename='admin.js') }}" defer></script>
+{% endblock %}
 {% endblock %}

@@ -12,7 +12,10 @@
         <button id="toggle-controls-btn" class="toggle-controls-btn" aria-label="Hide controls" title="Hide controls">
             <svg id="toggle-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4,6 8,10 12,6"/></svg>
         </button>
-        <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+        <form method="post" action="{{ url_for('logout') }}" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="logout-btn">Logout</button>
+        </form>
     </div>
 </header>
 
