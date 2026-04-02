@@ -382,7 +382,7 @@ def item_history():
     return jsonify([r["name"] for r in rows])
 
 
-@app.route("/api/items/history/<path:name>", methods=["DELETE"])
+@app.route("/api/items/history/<string:name>", methods=["DELETE"])
 @login_required
 def delete_history_item(name):
     db = get_db()
@@ -458,6 +458,12 @@ def add_item():
     broadcast("update")
     return jsonify(dict(item)), 201
 
+
+# NOTE: Item and list mutations below intentionally allow any authenticated user to
+# modify any item or list. This app is designed for household shared access — all
+# users collaborate on the same lists with equal write permissions. There is no
+# per-list membership model by design. If private lists are ever added, these
+# endpoints will need ownership checks before that feature ships.
 
 @app.route("/api/items/<int:item_id>/toggle", methods=["POST"])
 @login_required

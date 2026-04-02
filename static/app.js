@@ -96,7 +96,7 @@
         opts.headers = { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, ...opts.headers };
 
         if (method !== 'GET' && !navigator.onLine) {
-            await pushQueue({ method, url, body: opts.body || null });
+            await pushQueue({ method, url, body: opts.body || null, csrfToken });
             applyOptimistic(method, url, opts.body || null);
             return { ok: true };
         }
@@ -108,7 +108,7 @@
         } catch (e) {
             // Network error while browser thinks we're online
             if (method !== 'GET') {
-                await pushQueue({ method, url, body: opts.body || null });
+                await pushQueue({ method, url, body: opts.body || null, csrfToken });
                 applyOptimistic(method, url, opts.body || null);
                 return { ok: true };
             }
@@ -129,7 +129,7 @@
             try {
                 const res = await fetch(op.url, {
                     method: op.method,
-                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': op.csrfToken || csrfToken },
                     body: op.body || undefined,
                 });
                 if (res.status === 401) {
