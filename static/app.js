@@ -3,6 +3,168 @@
     "use strict";
 
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+    const usernameMeta = document.querySelector('meta[name="username"]');
+    const currentUsername = usernameMeta ? usernameMeta.content : '';
+
+    // ---- Local state ----
+    let localItems = [];
+    let localItemsDirty = false;
+
+    // ---- IndexedDB helpers ----
+
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open('grocery-offline', 1);
+            req.onupgradeneeded = (e) => {
+                e.target.result.createObjectStore('op-queue', { autoIncrement: true });
+            };
+            req.onsuccess = (e) => resolve(e.target.result);
+            req.onerror = (e) => reject(e.target.error);
+        });
+    }
+
+    async function pushQueue(op) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('op-queue', 'readwrite');
+            tx.objectStore('op-queue').add(op);
+            tx.oncomplete = resolve;
+            tx.onerror = (e) => reject(e.target.error);
+        });
+    }
+
+    async function getAllQueue() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('op-queue', 'readonly');
+            const store = tx.objectStore('op-queue');
+            let ops = null, keys = null;
+            const done = () => { if (ops !== null && keys !== null) resolve({ ops, keys }); };
+            store.getAll().onsuccess = (e) => { ops = e.target.result; done(); };
+            store.getAllKeys().onsuccess = (e) => { keys = e.target.result; done(); };
+            tx.onerror = (e) => reject(e.target.error);
+        });
+    }
+
+    async function deleteQueueEntry(key) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('op-queue', 'readwrite');
+            tx.objectStore('op-queue').delete(key);
+            tx.oncomplete = resolve;
+            tx.onerror = (e) => reject(e.target.error);
+        });
+    }
+
+    // ---- Optimistic local mutations ----
+
+    function applyOptimistic(method, url, bodyStr) {
+        localItemsDirty = true;
+        const body = bodyStr ? JSON.parse(bodyStr) : {};
+        if (method === 'POST' && url === '/api/items') {
+            localItems.unshift({
+                id: 'pending-' + Date.now(),
+                name: body.name,
+                section: body.section || 'now',
+                quantity: body.quantity || null,
+                notes: body.notes || null,
+                is_bought: 0,
+                list_id: body.list_id,
+                added_by_name: currentUsername,
+                pending: true,
+            });
+        } else if (method === 'POST' && /\/api\/items\/[^/]+\/toggle/.test(url)) {
+            const idStr = url.match(/\/api\/items\/([^/]+)\/toggle/)[1];
+            const item = localItems.find(i => String(i.id) === idStr);
+            if (item) item.is_bought = item.is_bought ? 0 : 1;
+        } else if (method === 'POST' && /\/api\/items\/[^/]+\/move/.test(url)) {
+            const idStr = url.match(/\/api\/items\/([^/]+)\/move/)[1];
+            const item = localItems.find(i => String(i.id) === idStr);
+            if (item) item.section = item.section === 'now' ? 'later' : 'now';
+        } else if (method === 'DELETE' && /\/api\/items\/[^/]+$/.test(url)) {
+            const idStr = url.match(/\/api\/items\/([^/]+)$/)[1];
+            localItems = localItems.filter(i => String(i.id) !== idStr);
+        } else if (method === 'POST' && url === '/api/items/clear-bought') {
+            localItems = localItems.filter(i => !i.is_bought);
+        }
+    }
+
+    // ---- API helper ----
+
+    async function api(url, opts = {}) {
+        const method = (opts.method || 'GET').toUpperCase();
+        opts.headers = { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, ...opts.headers };
+
+        if (method !== 'GET' && !navigator.onLine) {
+            await pushQueue({ method, url, body: opts.body || null });
+            applyOptimistic(method, url, opts.body || null);
+            return { ok: true };
+        }
+
+        try {
+            const res = await fetch(url, opts);
+            if (res.status === 401) { window.location.href = '/login'; return null; }
+            return res.json();
+        } catch (e) {
+            // Network error while browser thinks we're online
+            if (method !== 'GET') {
+                await pushQueue({ method, url, body: opts.body || null });
+                applyOptimistic(method, url, opts.body || null);
+                return { ok: true };
+            }
+            return null;
+        }
+    }
+
+    // ---- Flush offline queue ----
+
+    async function flushQueue() {
+        const { ops, keys } = await getAllQueue();
+        if (ops.length === 0) return;
+
+        showSyncIndicator(true);
+        for (let i = 0; i < ops.length; i++) {
+            const op = ops[i];
+            const key = keys[i];
+            try {
+                const res = await fetch(op.url, {
+                    method: op.method,
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                    body: op.body || undefined,
+                });
+                if (res.status === 401) {
+                    showSyncIndicator(false);
+                    window.location.href = '/login';
+                    return;
+                }
+                // Remove on 2xx or 4xx (conflict/gone -- no retry for client errors)
+                await deleteQueueEntry(key);
+            } catch (e) {
+                // Network error mid-flush: stop and retry on next online event
+                break;
+            }
+        }
+        localItemsDirty = false;
+        showSyncIndicator(false);
+        await loadLists();
+        loadItems();
+    }
+
+    // ---- Offline UI ----
+
+    const offlineBanner = document.getElementById('offline-banner');
+    const syncIndicator = document.getElementById('sync-indicator');
+
+    function updateOfflineBanner() {
+        if (offlineBanner) offlineBanner.hidden = navigator.onLine;
+    }
+
+    function showSyncIndicator(show) {
+        if (syncIndicator) syncIndicator.hidden = !show;
+    }
+
+    window.addEventListener('online', () => { updateOfflineBanner(); flushQueue(); });
+    window.addEventListener('offline', updateOfflineBanner);
 
     // ---- Toggle controls ----
     const toggleControlsBtn = document.getElementById("toggle-controls-btn");
@@ -42,18 +204,6 @@
     const sectionBoughtEl = document.getElementById("section-bought");
 
     let currentListId = null;
-
-    // ---- API helpers ----
-
-    async function api(url, opts = {}) {
-        opts.headers = { "Content-Type": "application/json", "X-CSRFToken": csrfToken, ...opts.headers };
-        const res = await fetch(url, opts);
-        if (res.status === 401) {
-            window.location.href = "/login";
-            return null;
-        }
-        return res.json();
-    }
 
     // ---- Lists ----
 
@@ -137,14 +287,18 @@
 
     function createItemEl(item) {
         const li = document.createElement("li");
-        li.className = "item" + (item.is_bought ? " bought" : "");
+        li.className = "item" + (item.is_bought ? " bought" : "") + (item.pending ? " pending" : "");
         li.dataset.id = item.id;
 
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = !!item.is_bought;
         cb.setAttribute("aria-label", "Mark " + item.name + " as bought");
-        cb.addEventListener("change", () => toggleItem(item.id));
+        if (item.pending) {
+            cb.disabled = true;
+        } else {
+            cb.addEventListener("change", () => toggleItem(item.id));
+        }
 
         const content = document.createElement("div");
         content.className = "item-content";
@@ -179,7 +333,7 @@
         const actions = document.createElement("span");
         actions.className = "item-actions";
 
-        if (!item.is_bought) {
+        if (!item.pending && !item.is_bought) {
             const moveBtn = document.createElement("button");
             moveBtn.textContent = item.section === "now" ? "\u2935" : "\u2934";
             moveBtn.title = item.section === "now" ? "Move to Later" : "Move to Now";
@@ -188,13 +342,15 @@
             actions.appendChild(moveBtn);
         }
 
-        const deleteBtn = document.createElement("button");
-        deleteBtn.textContent = "\u00D7";
-        deleteBtn.title = "Delete item";
-        deleteBtn.className = "delete-btn";
-        deleteBtn.setAttribute("aria-label", "Delete " + item.name);
-        deleteBtn.addEventListener("click", () => deleteItem(item.id));
-        actions.appendChild(deleteBtn);
+        if (!item.pending) {
+            const deleteBtn = document.createElement("button");
+            deleteBtn.textContent = "\u00D7";
+            deleteBtn.title = "Delete item";
+            deleteBtn.className = "delete-btn";
+            deleteBtn.setAttribute("aria-label", "Delete " + item.name);
+            deleteBtn.addEventListener("click", () => deleteItem(item.id));
+            actions.appendChild(deleteBtn);
+        }
 
         li.appendChild(cb);
         li.appendChild(content);
@@ -208,8 +364,17 @@
 
     async function loadItems() {
         if (!currentListId) return;
+        // If we have unsynced optimistic mutations, render from local state
+        // rather than overwriting it with a (potentially stale) cached response
+        if (localItemsDirty) {
+            renderItems(localItems);
+            return;
+        }
         const items = await api("/api/items?list_id=" + currentListId);
-        if (items) renderItems(items);
+        if (items) {
+            localItems = items;
+        }
+        renderItems(localItems);
     }
 
     async function addItem() {
@@ -306,6 +471,9 @@
 
     listSelect.addEventListener("change", () => {
         currentListId = parseInt(listSelect.value, 10);
+        // Clear local state when switching lists so loadItems fetches fresh
+        localItems = [];
+        localItemsDirty = false;
         loadItems();
     });
     newListBtn.addEventListener("click", createList);
@@ -324,15 +492,26 @@
 
     function connectSSE() {
         const es = new EventSource("/api/stream");
-        es.addEventListener("update", () => loadItems());
+        // Skip SSE-triggered reloads while we have unsynced local mutations
+        es.addEventListener("update", () => { if (!localItemsDirty) loadItems(); });
         es.onerror = () => {
             es.close();
             setTimeout(connectSSE, 3000);
         };
     }
 
+    // ---- Service worker ----
+
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+    }
+
     // ---- Init ----
+    updateOfflineBanner();
     loadLists().then(() => loadItems());
     loadHistory();
     connectSSE();
+    // Replay any ops queued during a previous offline session
+    if (navigator.onLine) flushQueue();
+
 })();

@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 {% block head %}
+<meta name="username" content="{{ username }}">
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 {% endblock %}
 {% block body %}
+<div id="offline-banner" hidden>Offline — changes will sync when reconnected</div>
+<div id="sync-indicator" hidden>Syncing…</div>
 <header>
     <h1>GroceryList</h1>
     <div class="header-actions">

@@ -663,6 +663,13 @@ def manifest():
     return app.send_static_file("manifest.webmanifest"), 200, {"Content-Type": "application/manifest+json"}
 
 
+@app.route("/sw.js")
+def service_worker():
+    response = app.send_static_file("sw.js")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # SSE stream
 # ---------------------------------------------------------------------------

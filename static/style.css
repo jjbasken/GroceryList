@@ -632,3 +632,34 @@ section h2 {
     padding: 1px 5px;
     border-radius: 3px;
 }
+
+/* ---- Offline mode ---- */
+#offline-banner {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #7d6608;
+    color: #fff;
+    text-align: center;
+    padding: 10px 16px;
+    font-size: 0.85rem;
+    z-index: 100;
+}
+
+#sync-indicator {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--accent);
+    color: #fff;
+    text-align: center;
+    padding: 10px 16px;
+    font-size: 0.85rem;
+    z-index: 100;
+}
+
+.item.pending {
+    opacity: 0.6;
+}
