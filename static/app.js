@@ -166,6 +166,21 @@
     window.addEventListener('online', () => { updateOfflineBanner(); flushQueue(); });
     window.addEventListener('offline', updateOfflineBanner);
 
+    // Flush queue and reload when returning from background or BFCache
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && navigator.onLine) flushQueue();
+    });
+    window.addEventListener('pageshow', (e) => {
+        updateOfflineBanner();
+        if (navigator.onLine) flushQueue();
+        if (e.persisted) {
+            // Restored from BFCache — reset stale in-memory state and reload
+            localItems = [];
+            localItemsDirty = false;
+            loadLists().then(() => loadItems());
+        }
+    });
+
     // ---- Toggle controls ----
     const toggleControlsBtn = document.getElementById("toggle-controls-btn");
     const CONTROLS_KEY = "controls-collapsed";
