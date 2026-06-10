@@ -245,7 +245,7 @@ class TestChangePassword:
 class TestListsAPI:
     def test_requires_auth(self, client):
         rv = client.get("/api/lists")
-        assert rv.status_code == 302
+        assert rv.status_code == 401
 
     def test_get_returns_empty_list(self, client):
         make_user()
@@ -296,7 +296,7 @@ class TestListsAPI:
 
     def test_delete_list_requires_auth(self, client):
         lid = make_list()
-        assert client.delete(f"/api/lists/{lid}").status_code == 302
+        assert client.delete(f"/api/lists/{lid}").status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ class TestListsAPI:
 
 class TestItemsAPI:
     def test_get_requires_auth(self, client):
-        assert client.get("/api/items").status_code == 302
+        assert client.get("/api/items").status_code == 401
 
     def test_get_items_empty_for_list(self, client):
         make_user()
@@ -496,7 +496,7 @@ class TestItemsAPI:
 
 class TestItemHistory:
     def test_requires_auth(self, client):
-        assert client.get("/api/items/history").status_code == 302
+        assert client.get("/api/items/history").status_code == 401
 
     def test_returns_empty_list(self, client):
         make_user()
@@ -718,10 +718,6 @@ class TestSecurityHeaders:
     "method,url",
     [
         ("GET", "/"),
-        ("GET", "/api/lists"),
-        ("GET", "/api/items"),
-        ("GET", "/api/items/history"),
-        ("GET", "/api/stream"),
         ("GET", "/change-password"),
         ("GET", "/admin/users"),
     ],
@@ -730,6 +726,48 @@ def test_unauthenticated_redirects_to_login(client, method, url):
     rv = client.open(url, method=method)
     assert rv.status_code == 302
     assert "/login" in rv.location
+
+
+@pytest.mark.parametrize(
+    "method,url",
+    [
+        ("GET", "/api/lists"),
+        ("GET", "/api/items"),
+        ("GET", "/api/items/history"),
+        ("GET", "/api/stream"),
+        ("GET", "/api/csrf-token"),
+    ],
+)
+def test_unauthenticated_api_returns_401_json(client, method, url):
+    # API calls must get 401 (not a 302) so fetch() can detect expired sessions
+    rv = client.open(url, method=method)
+    assert rv.status_code == 401
+    assert rv.get_json()["error"] == "unauthorized"
+
+
+class TestCsrf:
+    def test_csrf_token_endpoint_returns_token(self, client):
+        make_user()
+        do_login(client)
+        rv = client.get("/api/csrf-token")
+        assert rv.status_code == 200
+        assert rv.get_json()["token"]
+
+    def test_csrf_failure_on_api_returns_json(self, app, client):
+        make_user()
+        do_login(client)
+        app.config["WTF_CSRF_ENABLED"] = True
+        try:
+            rv = jpost(client, "/api/items", {"name": "Milk"})
+        finally:
+            app.config["WTF_CSRF_ENABLED"] = False
+        assert rv.status_code == 400
+        assert rv.get_json()["error"] == "csrf"
+
+    def test_csrf_time_limit_disabled(self, app):
+        # A timed token goes stale while the PWA sits open; tokens must remain
+        # valid for the whole session instead.
+        assert app.config["WTF_CSRF_TIME_LIMIT"] is None
 
 
 # ---------------------------------------------------------------------------

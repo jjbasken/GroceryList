@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'grocery-v2';
+const SHELL_CACHE = 'grocery-v3';
 const DATA_CACHE = 'grocery-data-v1';
 
 // Static assets only -- the HTML page (/) is excluded because it contains a

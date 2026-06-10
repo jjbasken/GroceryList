@@ -2,7 +2,7 @@
 (function () {
     "use strict";
 
-    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+    let csrfToken = document.querySelector('meta[name="csrf-token"]').content;
     const usernameMeta = document.querySelector('meta[name="username"]');
     const currentUsername = usernameMeta ? usernameMeta.content : '';
 
@@ -91,29 +91,56 @@
 
     // ---- API helper ----
 
+    async function refreshCsrfToken() {
+        try {
+            const res = await fetch('/api/csrf-token');
+            if (res.status === 401) { window.location.href = '/login'; return false; }
+            const data = await res.json();
+            if (data && data.token) { csrfToken = data.token; return true; }
+        } catch (e) { /* offline -- keep the old token */ }
+        return false;
+    }
+
+    async function isCsrfFailure(res) {
+        if (res.status !== 400) return false;
+        const body = await res.clone().json().catch(() => null);
+        return !!(body && body.error === 'csrf');
+    }
+
     async function api(url, opts = {}) {
         const method = (opts.method || 'GET').toUpperCase();
-        opts.headers = { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, ...opts.headers };
-
-        if (method !== 'GET' && !navigator.onLine) {
-            await pushQueue({ method, url, body: opts.body || null, csrfToken });
+        const doFetch = () => fetch(url, {
+            ...opts,
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, ...opts.headers },
+        });
+        const queueOp = async () => {
+            await pushQueue({ method, url, body: opts.body || null });
             applyOptimistic(method, url, opts.body || null);
             return { ok: true };
-        }
+        };
 
+        if (method !== 'GET' && !navigator.onLine) return queueOp();
+
+        let res;
         try {
-            const res = await fetch(url, opts);
-            if (res.status === 401) { window.location.href = '/login'; return null; }
-            return res.json();
+            res = await doFetch();
         } catch (e) {
             // Network error while browser thinks we're online
-            if (method !== 'GET') {
-                await pushQueue({ method, url, body: opts.body || null, csrfToken });
-                applyOptimistic(method, url, opts.body || null);
-                return { ok: true };
-            }
-            return null;
+            return method !== 'GET' ? queueOp() : null;
         }
+
+        // Stale CSRF token (e.g. PWA resumed long after the page rendered):
+        // grab a fresh token and retry once.
+        if (method !== 'GET' && await isCsrfFailure(res) && await refreshCsrfToken()) {
+            try {
+                res = await doFetch();
+            } catch (e) {
+                return queueOp();
+            }
+        }
+
+        if (res.status === 401) { window.location.href = '/login'; return null; }
+        return res.json().catch(() => null);
     }
 
     // ---- Flush offline queue ----
@@ -126,12 +153,18 @@
         for (let i = 0; i < ops.length; i++) {
             const op = ops[i];
             const key = keys[i];
+            const replay = () => fetch(op.url, {
+                method: op.method,
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                body: op.body || undefined,
+            });
             try {
-                const res = await fetch(op.url, {
-                    method: op.method,
-                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': op.csrfToken || csrfToken },
-                    body: op.body || undefined,
-                });
+                let res = await replay();
+                // Page token may be stale (queued ops can outlive a render);
+                // refresh and retry once rather than dropping the write below.
+                if (await isCsrfFailure(res) && await refreshCsrfToken()) {
+                    res = await replay();
+                }
                 if (res.status === 401) {
                     showSyncIndicator(false);
                     window.location.href = '/login';

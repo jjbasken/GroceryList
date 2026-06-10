@@ -19,14 +19,14 @@ from flask import (
     session,
     url_for,
 )
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFError, CSRFProtect, generate_csrf
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 import config
 
 app = Flask(__name__)
-app.secret_key = config.SECRET_KEY
+app.config.from_object(config)  # SECRET_KEY, WTF_CSRF_TIME_LIMIT
 app.permanent_session_lifetime = timedelta(days=36500)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -165,18 +165,26 @@ def has_users():
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+def auth_failure():
+    # fetch() follows redirects transparently, so API clients can't detect a
+    # 302-to-login. Return 401 JSON for API paths so the frontend can react.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "unauthorized"}), 401
+    return redirect(url_for("login"))
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_id" not in session:
-            return redirect(url_for("login"))
+            return auth_failure()
         # Re-validate is_active on every request (cheap indexed lookup)
         user = get_db().execute(
             "SELECT is_active FROM users WHERE id = ?", (session["user_id"],)
         ).fetchone()
         if not user or user["is_active"] != 1:
             session.clear()
-            return redirect(url_for("login"))
+            return auth_failure()
         return f(*args, **kwargs)
     return decorated
 
@@ -185,17 +193,26 @@ def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_id" not in session:
-            return redirect(url_for("login"))
+            return auth_failure()
         user = get_db().execute(
             "SELECT is_active, role FROM users WHERE id = ?", (session["user_id"],)
         ).fetchone()
         if not user or user["is_active"] != 1:
             session.clear()
-            return redirect(url_for("login"))
+            return auth_failure()
         if user["role"] != "admin":
             return redirect(url_for("index"))
         return f(*args, **kwargs)
     return decorated
+
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    if request.path.startswith("/api/"):
+        # Recognizable shape so the frontend can refresh its token and retry
+        return jsonify({"error": "csrf", "message": e.description}), 400
+    flash("Your session expired — please try again.")
+    return redirect(request.referrer or url_for("index"))
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +346,13 @@ def index():
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
+
+@app.route("/api/csrf-token")
+@login_required
+def csrf_token():
+    # Lets a long-running PWA page refresh its CSRF token without a full reload
+    return jsonify({"token": generate_csrf()})
+
 
 @app.route("/api/lists")
 @login_required
