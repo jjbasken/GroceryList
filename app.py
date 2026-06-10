@@ -527,26 +527,39 @@ def clear_bought():
 # ---------------------------------------------------------------------------
 
 @app.route("/change-password", methods=["GET", "POST"])
+@limiter.limit("10 per minute", methods=["POST"])
 @login_required
 def change_password():
-    if request.method == "GET":
-        return render_template("change_password.html")
+    db = get_db()
+    user = db.execute(
+        "SELECT password_hash, must_change_password FROM users WHERE id = ?",
+        (session["user_id"],),
+    ).fetchone()
+    # Forced resets are exempt: the admin just set a temporary password the
+    # user authenticated with, so re-prompting for it proves nothing.
+    require_current = not user["must_change_password"]
 
+    if request.method == "GET":
+        return render_template("change_password.html", require_current=require_current)
+
+    current = request.form.get("current", "").strip()
     new_password = request.form.get("password", "").strip()
     confirm = request.form.get("confirm", "").strip()
 
     if not new_password:
         flash("Password is required.")
-        return render_template("change_password.html"), 400
+        return render_template("change_password.html", require_current=require_current), 400
     if len(new_password) < 5:
         flash("Password must be at least 5 characters.")
-        return render_template("change_password.html"), 400
+        return render_template("change_password.html", require_current=require_current), 400
     if new_password != confirm:
         flash("Passwords do not match.")
-        return render_template("change_password.html"), 400
+        return render_template("change_password.html", require_current=require_current), 400
+    if require_current and not bcrypt.checkpw(current.encode(), user["password_hash"].encode()):
+        flash("Current password is incorrect.")
+        return render_template("change_password.html", require_current=require_current), 403
 
     pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-    db = get_db()
     db.execute(
         "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
         (pw_hash, session["user_id"]),

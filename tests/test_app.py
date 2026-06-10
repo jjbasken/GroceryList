@@ -177,7 +177,7 @@ class TestChangePassword:
         rv = client.get("/change-password")
         assert rv.status_code == 200
 
-    def test_success_redirects_and_clears_must_change_flag(self, client, app):
+    def test_forced_reset_succeeds_without_current_password(self, client, app):
         make_user(must_change=1)
         do_login(client)
         rv = client.post(
@@ -190,23 +190,50 @@ class TestChangePassword:
     def test_new_password_works_for_subsequent_login(self, client):
         make_user()
         do_login(client)
-        client.post("/change-password", data={"password": "newpass99", "confirm": "newpass99"})
+        client.post(
+            "/change-password",
+            data={"current": "pass1234", "password": "newpass99", "confirm": "newpass99"},
+        )
         client.post("/logout")
         rv = do_login(client, username="alice", password="newpass99")
         assert rv.status_code == 302
+
+    def test_wrong_current_password_rejected(self, client):
+        make_user()
+        do_login(client)
+        rv = client.post(
+            "/change-password",
+            data={"current": "wrongpass", "password": "newpass99", "confirm": "newpass99"},
+        )
+        assert rv.status_code == 403
+        # old password still works
+        client.post("/logout")
+        rv = do_login(client)
+        assert rv.status_code == 302
+
+    def test_missing_current_password_rejected(self, client):
+        make_user()
+        do_login(client)
+        rv = client.post(
+            "/change-password", data={"password": "newpass99", "confirm": "newpass99"}
+        )
+        assert rv.status_code == 403
 
     def test_mismatched_passwords_rejected(self, client):
         make_user()
         do_login(client)
         rv = client.post(
-            "/change-password", data={"password": "newpass99", "confirm": "different"}
+            "/change-password",
+            data={"current": "pass1234", "password": "newpass99", "confirm": "different"},
         )
         assert rv.status_code == 400
 
     def test_short_password_rejected(self, client):
         make_user()
         do_login(client)
-        rv = client.post("/change-password", data={"password": "ab", "confirm": "ab"})
+        rv = client.post(
+            "/change-password", data={"current": "pass1234", "password": "ab", "confirm": "ab"}
+        )
         assert rv.status_code == 400
 
 
