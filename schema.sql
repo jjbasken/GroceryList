@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
     is_active INTEGER NOT NULL DEFAULT 1,
-    must_change_password INTEGER NOT NULL DEFAULT 0
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    session_epoch INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS lists (

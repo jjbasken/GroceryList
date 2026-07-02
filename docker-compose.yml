@@ -7,7 +7,11 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - DATABASE=/data/grocery.db
     ports:
-      - 5000:5000
+      # Loopback only: public traffic must come through the Cloudflare tunnel,
+      # which reaches web:5000 over grocery-net. Binding 0.0.0.0 would expose
+      # plaintext HTTP to the LAN and bypass host firewall rules (Docker
+      # inserts its own iptables rules ahead of ufw/firewalld).
+      - 127.0.0.1:5000:5000
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/login')"]

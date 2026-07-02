@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import timedelta
 from functools import wraps
+from urllib.parse import urlparse
 
 import bcrypt
 from flask import (
@@ -99,6 +100,8 @@ def upgrade_db():
         db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if 'must_change_password' not in cols:
         db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+    if 'session_epoch' not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
 
     # --- Lists table (old DBs won't have it) ---
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -178,11 +181,13 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if "user_id" not in session:
             return auth_failure()
-        # Re-validate is_active on every request (cheap indexed lookup)
+        # Re-validate is_active + session_epoch on every request (cheap indexed
+        # lookup). Flask sessions live client-side, so the epoch column is the
+        # server's only lever to invalidate already-issued cookies.
         user = get_db().execute(
-            "SELECT is_active FROM users WHERE id = ?", (session["user_id"],)
+            "SELECT is_active, session_epoch FROM users WHERE id = ?", (session["user_id"],)
         ).fetchone()
-        if not user or user["is_active"] != 1:
+        if not user or user["is_active"] != 1 or session.get("epoch") != user["session_epoch"]:
             session.clear()
             return auth_failure()
         return f(*args, **kwargs)
@@ -195,9 +200,9 @@ def admin_required(f):
         if "user_id" not in session:
             return auth_failure()
         user = get_db().execute(
-            "SELECT is_active, role FROM users WHERE id = ?", (session["user_id"],)
+            "SELECT is_active, role, session_epoch FROM users WHERE id = ?", (session["user_id"],)
         ).fetchone()
-        if not user or user["is_active"] != 1:
+        if not user or user["is_active"] != 1 or session.get("epoch") != user["session_epoch"]:
             session.clear()
             return auth_failure()
         if user["role"] != "admin":
@@ -206,13 +211,24 @@ def admin_required(f):
     return decorated
 
 
+def safe_referrer():
+    # The Referer header is request-controlled; redirecting to it blindly is an
+    # open redirect. Only follow it back to our own host.
+    ref = request.referrer
+    if ref:
+        parts = urlparse(ref)
+        if parts.scheme in ("http", "https") and parts.netloc == request.host:
+            return ref
+    return None
+
+
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
     if request.path.startswith("/api/"):
         # Recognizable shape so the frontend can refresh its token and retry
         return jsonify({"error": "csrf", "message": e.description}), 400
     flash("Your session expired — please try again.")
-    return redirect(request.referrer or url_for("index"))
+    return redirect(safe_referrer() or url_for("index"))
 
 
 # ---------------------------------------------------------------------------
@@ -274,10 +290,11 @@ def register():
         "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, pw_hash),
     )
-    user = db.execute("SELECT id, role FROM users WHERE username = ?", (username,)).fetchone()
+    user = db.execute("SELECT id, role, session_epoch FROM users WHERE username = ?", (username,)).fetchone()
     session["user_id"] = user["id"]
     session["username"] = username
     session["role"] = user["role"]
+    session["epoch"] = user["session_epoch"]
     session["must_change_password"] = False
     log_audit("user.register", f"Initial admin account '{username}' created")
     db.commit()
@@ -313,6 +330,7 @@ def login():
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         session["role"] = user["role"]
+        session["epoch"] = user["session_epoch"]
         session["must_change_password"] = bool(user["must_change_password"])
         if user["must_change_password"]:
             return redirect(url_for("change_password"))
@@ -678,6 +696,27 @@ def admin_reset_password(user_id):
     )
     log_audit("admin.password_reset", f"Reset password for user '{user['username']}'")
     db.commit()
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/<int:user_id>/revoke-sessions", methods=["POST"])
+@admin_required
+def admin_revoke_sessions(user_id):
+    db = get_db()
+    target = db.execute("SELECT username, session_epoch FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        flash("User not found.")
+        return redirect(url_for("admin_users"))
+    new_epoch = target["session_epoch"] + 1
+    db.execute("UPDATE users SET session_epoch = ? WHERE id = ?", (new_epoch, user_id))
+    log_audit("admin.sessions_revoke", f"Revoked all sessions for user '{target['username']}'")
+    db.commit()
+    if user_id == session["user_id"]:
+        # Keep the session that issued the revocation; every other device dies.
+        session["epoch"] = new_epoch
+        flash("All your other sessions have been logged out.")
+    else:
+        flash(f"All sessions for '{target['username']}' have been logged out.")
     return redirect(url_for("admin_users"))
 
 

@@ -671,6 +671,87 @@ class TestAdminUsers:
 
 
 # ---------------------------------------------------------------------------
+# Admin — session revocation
+# ---------------------------------------------------------------------------
+
+
+class TestSessionRevocation:
+    def _as_admin(self, client):
+        make_user("admin_user", role="admin")
+        do_login(client, "admin_user")
+
+    def _admin_id(self, app):
+        return db_query(app, "SELECT id FROM users WHERE username = 'admin_user'")["id"]
+
+    def test_revoke_logs_out_existing_session(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        bob_client = app.test_client()
+        do_login(bob_client, "bob")
+        assert bob_client.get("/").status_code == 200
+        client.post(f"/admin/users/{uid}/revoke-sessions")
+        rv = bob_client.get("/")
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+    def test_revoke_logs_out_api_session(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        bob_client = app.test_client()
+        do_login(bob_client, "bob")
+        client.post(f"/admin/users/{uid}/revoke-sessions")
+        assert bob_client.get("/api/lists").status_code == 401
+
+    def test_user_can_log_in_again_after_revoke(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        bob_client = app.test_client()
+        do_login(bob_client, "bob")
+        client.post(f"/admin/users/{uid}/revoke-sessions")
+        do_login(bob_client, "bob")
+        assert bob_client.get("/").status_code == 200
+
+    def test_self_revoke_keeps_current_session(self, client, app):
+        """Revoking your own sessions logs out other devices but not this one."""
+        self._as_admin(client)
+        admin_id = self._admin_id(app)
+        other_device = app.test_client()
+        do_login(other_device, "admin_user")
+        client.post(f"/admin/users/{admin_id}/revoke-sessions")
+        assert client.get("/admin/users").status_code == 200
+        rv = other_device.get("/")
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+    def test_revoke_writes_audit_log(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        client.post(f"/admin/users/{uid}/revoke-sessions")
+        row = db_query(app, "SELECT detail FROM audit_log WHERE action = 'admin.sessions_revoke'")
+        assert row is not None
+        assert "bob" in row["detail"]
+
+    def test_revoke_requires_admin(self, client, app):
+        uid = make_user("bob")
+        make_user("carol")
+        do_login(client, "carol")
+        client.post(f"/admin/users/{uid}/revoke-sessions")
+        row = db_query(app, "SELECT session_epoch FROM users WHERE id = ?", (uid,))
+        assert row["session_epoch"] == 0
+
+    def test_stale_epoch_session_is_rejected(self, client, app):
+        """A cookie minted before an epoch bump no longer authenticates."""
+        make_user()
+        do_login(client)
+        with app.app_context():
+            get_db().execute("UPDATE users SET session_epoch = session_epoch + 1 WHERE username = 'alice'")
+            get_db().commit()
+        rv = client.get("/")
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+
+# ---------------------------------------------------------------------------
 # Security headers
 # ---------------------------------------------------------------------------
 
@@ -768,6 +849,28 @@ class TestCsrf:
         # A timed token goes stale while the PWA sits open; tokens must remain
         # valid for the whole session instead.
         assert app.config["WTF_CSRF_TIME_LIMIT"] is None
+
+    def test_csrf_failure_does_not_redirect_to_foreign_referrer(self, app, client):
+        make_user()
+        do_login(client)
+        app.config["WTF_CSRF_ENABLED"] = True
+        try:
+            rv = client.post("/logout", headers={"Referer": "https://evil.example/phish"})
+        finally:
+            app.config["WTF_CSRF_ENABLED"] = False
+        assert rv.status_code == 302
+        assert "evil.example" not in rv.location
+
+    def test_csrf_failure_redirects_back_to_same_host_referrer(self, app, client):
+        make_user()
+        do_login(client)
+        app.config["WTF_CSRF_ENABLED"] = True
+        try:
+            rv = client.post("/logout", headers={"Referer": "http://localhost/change-password"})
+        finally:
+            app.config["WTF_CSRF_ENABLED"] = False
+        assert rv.status_code == 302
+        assert rv.location.endswith("/change-password")
 
 
 # ---------------------------------------------------------------------------

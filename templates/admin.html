@@ -57,6 +57,10 @@
                                 {{ "Disable" if user.is_active else "Enable" }}
                             </button>
                         </form>
+                        <form method="post" action="{{ url_for('admin_revoke_sessions', user_id=user.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="admin-action-btn btn-warn">Revoke sessions</button>
+                        </form>
                         <form method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}"
                               class="delete-user-form" data-username="{{ user.username }}">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -64,6 +68,10 @@
                         </form>
                         {% else %}
                         <span class="admin-self-label">(you)</span>
+                        <form method="post" action="{{ url_for('admin_revoke_sessions', user_id=user.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="admin-action-btn btn-warn">Log out other devices</button>
+                        </form>
                         {% endif %}
                     </td>
                 </tr>
