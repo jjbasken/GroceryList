@@ -450,9 +450,73 @@ section h2 {
     background: var(--bg2);
 }
 
+.item-actions button.edit-btn:hover {
+    color: var(--accent);
+}
+
 .item-actions button.delete-btn:hover {
     color: var(--danger);
 }
+
+/* ---- Inline item edit ---- */
+.item.item-editing {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.edit-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.item-editing input,
+.item-editing select {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 1rem;
+    background: var(--bg2);
+    color: var(--text);
+}
+
+.edit-name { flex: 1; min-width: 0; }
+
+.edit-qty {
+    width: 72px;
+    flex-shrink: 0;
+    text-align: center;
+}
+
+.edit-notes { flex: 1; min-width: 0; }
+
+.edit-save,
+.edit-cancel {
+    padding: 10px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.edit-save {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+
+.edit-save:hover { background: var(--accent-hover); }
+
+.edit-cancel {
+    background: var(--bg2);
+    color: var(--text-muted);
+}
+
+.edit-cancel:hover { border-color: var(--danger); color: var(--danger); }
 
 /* ---- Bottom Actions ---- */
 .bottom-actions {

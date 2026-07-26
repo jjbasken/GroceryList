@@ -23,6 +23,12 @@ def jpost(client, url, payload):
     )
 
 
+def jput(client, url, payload):
+    return client.put(
+        url, data=json.dumps(payload), content_type="application/json"
+    )
+
+
 def db_query(app, sql, params=()):
     with app.app_context():
         return get_db().execute(sql, params).fetchone()
@@ -459,6 +465,106 @@ class TestItemsAPI:
         client.delete(f"/api/items/{iid}")
         row = db_query(app, "SELECT action FROM audit_log WHERE action = 'item.delete'")
         assert row is not None
+
+    def test_update_item(self, client, app):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk", section="now")
+        do_login(client)
+        rv = jput(client, f"/api/items/{iid}", {
+            "name": "Whole Milk", "section": "later",
+            "quantity": "2L", "notes": "cold", "list_id": lid,
+        })
+        assert rv.status_code == 200
+        item = rv.get_json()
+        assert item["name"] == "Whole Milk"
+        assert item["section"] == "later"
+        assert item["quantity"] == "2L"
+        assert item["notes"] == "cold"
+        row = db_query(app, "SELECT name, section, quantity, notes FROM items WHERE id = ?", (iid,))
+        assert row["name"] == "Whole Milk"
+        assert row["section"] == "later"
+        assert row["quantity"] == "2L"
+        assert row["notes"] == "cold"
+
+    def test_update_item_clears_optional_fields(self, client, app):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        jput(client, f"/api/items/{iid}", {"quantity": "1L", "notes": "cold"})
+        jput(client, f"/api/items/{iid}", {"name": "Milk", "quantity": "", "notes": ""})
+        row = db_query(app, "SELECT quantity, notes FROM items WHERE id = ?", (iid,))
+        assert row["quantity"] is None
+        assert row["notes"] is None
+
+    def test_update_item_preserves_bought_status(self, client, app):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk", is_bought=1)
+        do_login(client)
+        jput(client, f"/api/items/{iid}", {"name": "Skim Milk"})
+        row = db_query(app, "SELECT is_bought FROM items WHERE id = ?", (iid,))
+        assert row["is_bought"] == 1
+
+    def test_update_item_records_history(self, client, app):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        jput(client, f"/api/items/{iid}", {"name": "Oat Milk"})
+        assert db_query(app, "SELECT name FROM item_name_history WHERE name = 'Oat Milk'")
+
+    def test_update_item_empty_name_rejected(self, client):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        assert jput(client, f"/api/items/{iid}", {"name": ""}).status_code == 400
+
+    def test_update_item_name_too_long_rejected(self, client):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        assert jput(client, f"/api/items/{iid}", {"name": "x" * 201}).status_code == 400
+
+    def test_update_item_invalid_section_rejected(self, client):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        assert jput(client, f"/api/items/{iid}", {
+            "name": "Milk", "section": "someday"
+        }).status_code == 400
+
+    def test_update_item_quantity_too_long_rejected(self, client):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        assert jput(client, f"/api/items/{iid}", {
+            "name": "Milk", "quantity": "x" * 51
+        }).status_code == 400
+
+    def test_update_item_notes_too_long_rejected(self, client):
+        make_user()
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        do_login(client)
+        assert jput(client, f"/api/items/{iid}", {
+            "name": "Milk", "notes": "x" * 501
+        }).status_code == 400
+
+    def test_update_nonexistent_item_returns_404(self, client):
+        make_user()
+        do_login(client)
+        assert jput(client, "/api/items/9999", {"name": "Ghost"}).status_code == 404
+
+    def test_update_item_requires_auth(self, client):
+        lid = make_list()
+        iid = make_item(lid, "Milk")
+        assert jput(client, f"/api/items/{iid}", {"name": "Milk"}).status_code == 401
 
     def test_clear_bought_removes_only_bought_items(self, client, app):
         make_user()

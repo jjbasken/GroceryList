@@ -81,6 +81,15 @@
             const idStr = url.match(/\/api\/items\/([^/]+)\/move/)[1];
             const item = localItems.find(i => String(i.id) === idStr);
             if (item) item.section = item.section === 'now' ? 'later' : 'now';
+        } else if (method === 'PUT' && /\/api\/items\/[^/]+$/.test(url)) {
+            const idStr = url.match(/\/api\/items\/([^/]+)$/)[1];
+            const item = localItems.find(i => String(i.id) === idStr);
+            if (item) {
+                item.name = body.name;
+                item.quantity = body.quantity || null;
+                item.notes = body.notes || null;
+                item.section = body.section || item.section;
+            }
         } else if (method === 'DELETE' && /\/api\/items\/[^/]+$/.test(url)) {
             const idStr = url.match(/\/api\/items\/([^/]+)$/)[1];
             localItems = localItems.filter(i => String(i.id) !== idStr);
@@ -252,6 +261,7 @@
     const sectionBoughtEl = document.getElementById("section-bought");
 
     let currentListId = null;
+    let editingId = null;
 
     // ---- Lists ----
 
@@ -334,6 +344,10 @@
     }
 
     function createItemEl(item) {
+        if (editingId !== null && String(editingId) === String(item.id)) {
+            return createEditEl(item);
+        }
+
         const li = document.createElement("li");
         li.className = "item" + (item.is_bought ? " bought" : "") + (item.pending ? " pending" : "");
         li.dataset.id = item.id;
@@ -391,6 +405,16 @@
         }
 
         if (!item.pending) {
+            const editBtn = document.createElement("button");
+            editBtn.textContent = "\u270e";
+            editBtn.title = "Edit item";
+            editBtn.className = "edit-btn";
+            editBtn.setAttribute("aria-label", "Edit " + item.name);
+            editBtn.addEventListener("click", () => startEdit(item));
+            actions.appendChild(editBtn);
+        }
+
+        if (!item.pending) {
             const deleteBtn = document.createElement("button");
             deleteBtn.textContent = "\u00D7";
             deleteBtn.title = "Delete item";
@@ -408,10 +432,105 @@
         return li;
     }
 
+    function createEditEl(item) {
+        const li = document.createElement("li");
+        li.className = "item item-editing";
+        li.dataset.id = item.id;
+
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.className = "edit-name";
+        nameInput.value = item.name;
+        nameInput.setAttribute("aria-label", "Item name");
+
+        const qtyInput = document.createElement("input");
+        qtyInput.type = "text";
+        qtyInput.className = "edit-qty";
+        qtyInput.value = item.quantity || "";
+        qtyInput.placeholder = "Qty";
+        qtyInput.setAttribute("aria-label", "Quantity");
+
+        const sectionSel = document.createElement("select");
+        sectionSel.className = "edit-section";
+        [["now", "Now"], ["later", "Later"]].forEach(([value, label]) => {
+            const opt = document.createElement("option");
+            opt.value = value;
+            opt.textContent = label;
+            if (item.section === value) opt.selected = true;
+            sectionSel.appendChild(opt);
+        });
+
+        const notesInput = document.createElement("input");
+        notesInput.type = "text";
+        notesInput.className = "edit-notes";
+        notesInput.value = item.notes || "";
+        notesInput.placeholder = "Notes (optional)";
+        notesInput.setAttribute("aria-label", "Notes");
+
+        const saveBtn = document.createElement("button");
+        saveBtn.className = "edit-save";
+        saveBtn.textContent = "Save";
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.className = "edit-cancel";
+        cancelBtn.textContent = "Cancel";
+
+        const save = () => {
+            const name = nameInput.value.trim();
+            if (!name) { nameInput.focus(); return; }
+            editingId = null;
+            saveEdit(item.id, {
+                name,
+                quantity: qtyInput.value.trim() || null,
+                notes: notesInput.value.trim() || null,
+                section: sectionSel.value,
+            });
+        };
+        const cancel = () => { editingId = null; loadItems(); };
+
+        saveBtn.addEventListener("click", save);
+        cancelBtn.addEventListener("click", cancel);
+        [nameInput, qtyInput, notesInput].forEach(inp => {
+            inp.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") save();
+                if (e.key === "Escape") cancel();
+            });
+        });
+
+        const row1 = document.createElement("div");
+        row1.className = "edit-row";
+        row1.appendChild(nameInput);
+        row1.appendChild(qtyInput);
+        row1.appendChild(sectionSel);
+
+        const row2 = document.createElement("div");
+        row2.className = "edit-row";
+        row2.appendChild(notesInput);
+        row2.appendChild(saveBtn);
+        row2.appendChild(cancelBtn);
+
+        li.appendChild(row1);
+        li.appendChild(row2);
+
+        return li;
+    }
+
+    function startEdit(item) {
+        editingId = item.id;
+        renderItems(localItems);
+        const li = document.querySelector(".item-editing");
+        if (li) {
+            const nameInput = li.querySelector(".edit-name");
+            if (nameInput) { nameInput.focus(); nameInput.select(); }
+        }
+    }
+
     // ---- Actions ----
 
     async function loadItems() {
         if (!currentListId) return;
+        // Don't clobber an in-progress inline edit with a background refresh
+        if (editingId !== null) return;
         // If we have unsynced optimistic mutations, render from local state
         // rather than overwriting it with a (potentially stale) cached response
         if (localItemsDirty) {
@@ -455,6 +574,15 @@
     async function deleteItem(id) {
         await api("/api/items/" + id, { method: "DELETE" });
         loadItems();
+    }
+
+    async function saveEdit(id, payload) {
+        await api("/api/items/" + id, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+        });
+        loadItems();
+        loadHistory();
     }
 
     async function clearBought() {

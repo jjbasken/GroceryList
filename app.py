@@ -534,6 +534,55 @@ def move_item(item_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/items/<int:item_id>", methods=["PUT"])
+@login_required
+def update_item(item_id):
+    data = request.get_json()
+    name = (data.get("name") or "").strip()
+    section = data.get("section", "now")
+    quantity = (data.get("quantity") or "").strip() or None
+    notes = (data.get("notes") or "").strip() or None
+
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if len(name) > 200:
+        return jsonify({"error": "Name too long"}), 400
+    if quantity and len(quantity) > 50:
+        return jsonify({"error": "Quantity too long"}), 400
+    if notes and len(notes) > 500:
+        return jsonify({"error": "Notes too long"}), 400
+    if section not in ("now", "later"):
+        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+
+    db = get_db()
+    if db.execute("SELECT id FROM items WHERE id = ?", (item_id,)).fetchone() is None:
+        return jsonify({"error": "Not found"}), 404
+
+    # is_bought is intentionally left untouched -- editing details shouldn't
+    # un-buy an item.
+    db.execute(
+        "UPDATE items SET name = ?, section = ?, quantity = ?, notes = ?, "
+        "updated_at = datetime('now') WHERE id = ?",
+        (name, section, quantity, notes, item_id),
+    )
+    db.execute(
+        "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
+        "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
+        (name,),
+    )
+    db.commit()
+
+    item = db.execute(
+        "SELECT items.*, users.username AS added_by_name "
+        "FROM items LEFT JOIN users ON items.added_by = users.id "
+        "WHERE items.id = ?",
+        (item_id,),
+    ).fetchone()
+
+    broadcast("update")
+    return jsonify(dict(item))
+
+
 @app.route("/api/items/<int:item_id>", methods=["DELETE"])
 @login_required
 def delete_item(item_id):
