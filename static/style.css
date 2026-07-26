@@ -431,11 +431,16 @@ section h2 {
     flex-shrink: 0;
 }
 
-.item-actions button {
+.item-menu {
+    position: relative;
+}
+
+.item-menu .menu-btn {
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 1.1rem;
+    font-size: 1.3rem;
+    line-height: 1;
     cursor: pointer;
     padding: 6px;
     border-radius: 6px;
@@ -446,15 +451,51 @@ section h2 {
     justify-content: center;
 }
 
-.item-actions button:hover {
+.item-menu .menu-btn:hover {
     background: var(--bg2);
 }
 
-.item-actions button.edit-btn:hover {
+.item-menu-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 10;
+    min-width: 140px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    padding: 4px;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.item-menu.open .item-menu-dropdown {
+    display: flex;
+}
+
+.item-menu-dropdown button {
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 0.95rem;
+    text-align: left;
+    cursor: pointer;
+    padding: 10px 12px;
+    border-radius: 6px;
+    width: 100%;
+}
+
+.item-menu-dropdown button:hover {
+    background: var(--bg2);
+}
+
+.item-menu-dropdown button.edit-btn:hover {
     color: var(--accent);
 }
 
-.item-actions button.delete-btn:hover {
+.item-menu-dropdown button.delete-btn:hover {
     color: var(--danger);
 }
 

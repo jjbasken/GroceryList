@@ -343,6 +343,27 @@
         bought.forEach(i => sectionBoughtList.appendChild(createItemEl(i)));
     }
 
+    function closeItemMenu() {
+        const open = document.querySelector(".item-menu.open");
+        if (open) {
+            open.classList.remove("open");
+            const btn = open.querySelector(".menu-btn");
+            if (btn) btn.setAttribute("aria-expanded", "false");
+        }
+    }
+
+    function toggleItemMenu(menu) {
+        const wasOpen = menu.classList.contains("open");
+        closeItemMenu();
+        if (!wasOpen) {
+            menu.classList.add("open");
+            const btn = menu.querySelector(".menu-btn");
+            if (btn) btn.setAttribute("aria-expanded", "true");
+        }
+    }
+
+    document.addEventListener("click", closeItemMenu);
+
     function createItemEl(item) {
         if (editingId !== null && String(editingId) === String(item.id)) {
             return createEditEl(item);
@@ -395,33 +416,47 @@
         const actions = document.createElement("span");
         actions.className = "item-actions";
 
-        if (!item.pending && !item.is_bought) {
-            const moveBtn = document.createElement("button");
-            moveBtn.textContent = item.section === "now" ? "\u2935" : "\u2934";
-            moveBtn.title = item.section === "now" ? "Move to Later" : "Move to Now";
-            moveBtn.setAttribute("aria-label", moveBtn.title);
-            moveBtn.addEventListener("click", () => moveItem(item.id));
-            actions.appendChild(moveBtn);
-        }
-
         if (!item.pending) {
-            const editBtn = document.createElement("button");
-            editBtn.textContent = "\u270e";
-            editBtn.title = "Edit item";
-            editBtn.className = "edit-btn";
-            editBtn.setAttribute("aria-label", "Edit " + item.name);
-            editBtn.addEventListener("click", () => startEdit(item));
-            actions.appendChild(editBtn);
-        }
+            const menu = document.createElement("div");
+            menu.className = "item-menu";
 
-        if (!item.pending) {
-            const deleteBtn = document.createElement("button");
-            deleteBtn.textContent = "\u00D7";
-            deleteBtn.title = "Delete item";
-            deleteBtn.className = "delete-btn";
-            deleteBtn.setAttribute("aria-label", "Delete " + item.name);
-            deleteBtn.addEventListener("click", () => deleteItem(item.id));
-            actions.appendChild(deleteBtn);
+            const menuBtn = document.createElement("button");
+            menuBtn.className = "menu-btn";
+            menuBtn.textContent = "\u22ee";
+            menuBtn.title = "More options";
+            menuBtn.setAttribute("aria-label", "More options for " + item.name);
+            menuBtn.setAttribute("aria-haspopup", "true");
+            menuBtn.setAttribute("aria-expanded", "false");
+
+            const dropdown = document.createElement("div");
+            dropdown.className = "item-menu-dropdown";
+
+            const addAction = (label, className, onClick) => {
+                const btn = document.createElement("button");
+                btn.textContent = label;
+                if (className) btn.className = className;
+                btn.addEventListener("click", () => {
+                    closeItemMenu();
+                    onClick();
+                });
+                dropdown.appendChild(btn);
+            };
+
+            if (!item.is_bought) {
+                addAction(item.section === "now" ? "Move to Later" : "Move to Now",
+                    "", () => moveItem(item.id));
+            }
+            addAction("Edit", "edit-btn", () => startEdit(item));
+            addAction("Delete", "delete-btn", () => deleteItem(item.id));
+
+            menuBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                toggleItemMenu(menu);
+            });
+
+            menu.appendChild(menuBtn);
+            menu.appendChild(dropdown);
+            actions.appendChild(menu);
         }
 
         li.appendChild(cb);
