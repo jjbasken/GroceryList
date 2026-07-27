@@ -366,10 +366,6 @@ section h2 {
     color: var(--bought-text);
 }
 
-.item.bought .item-user {
-    color: var(--bought-text);
-}
-
 .item input[type="checkbox"] {
     width: 22px;
     height: 22px;
@@ -417,12 +413,6 @@ section h2 {
     font-size: 0.82rem;
     color: var(--text-muted);
     font-style: italic;
-}
-
-.item-user {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    flex-shrink: 0;
 }
 
 .item-actions {
@@ -473,6 +463,14 @@ section h2 {
 
 .item-menu.open .item-menu-dropdown {
     display: flex;
+}
+
+.item-menu-added-by {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 6px 12px 8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2px;
 }
 
 .item-menu-dropdown button {

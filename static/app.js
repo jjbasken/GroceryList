@@ -409,10 +409,6 @@
             content.appendChild(notesSpan);
         }
 
-        const user = document.createElement("span");
-        user.className = "item-user";
-        user.textContent = item.added_by_name || "";
-
         const actions = document.createElement("span");
         actions.className = "item-actions";
 
@@ -430,6 +426,13 @@
 
             const dropdown = document.createElement("div");
             dropdown.className = "item-menu-dropdown";
+
+            if (item.added_by_name) {
+                const addedBy = document.createElement("div");
+                addedBy.className = "item-menu-added-by";
+                addedBy.textContent = item.added_by_name;
+                dropdown.appendChild(addedBy);
+            }
 
             const addAction = (label, className, onClick) => {
                 const btn = document.createElement("button");
