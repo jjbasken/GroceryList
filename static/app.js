@@ -464,7 +464,6 @@
 
         li.appendChild(cb);
         li.appendChild(content);
-        li.appendChild(user);
         li.appendChild(actions);
 
         return li;
