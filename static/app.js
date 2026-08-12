@@ -261,13 +261,22 @@
     const sectionBoughtEl = document.getElementById("section-bought");
 
     let currentListId = null;
+    let currentLists = [];
     let editingId = null;
 
     // ---- Lists ----
 
+    // The server enforces this too; hiding the button just avoids a dead control.
+    function updateDeleteListBtn() {
+        const current = currentLists.find(l => l.id === currentListId);
+        const allowed = currentLists.length > 1 && current && current.can_delete;
+        deleteListBtn.style.display = allowed ? "" : "none";
+    }
+
     async function loadLists() {
         const lists = await api("/api/lists");
         if (!lists || !lists.length) return;
+        currentLists = lists;
 
         listSelect.innerHTML = "";
         lists.forEach(l => {
@@ -281,7 +290,7 @@
             currentListId = lists[0].id;
         }
         listSelect.value = currentListId;
-        deleteListBtn.style.display = lists.length <= 1 ? "none" : "";
+        updateDeleteListBtn();
     }
 
     async function createList() {
@@ -684,6 +693,7 @@
 
     listSelect.addEventListener("change", () => {
         currentListId = parseInt(listSelect.value, 10);
+        updateDeleteListBtn();
         // Clear local state when switching lists so loadItems fetches fresh
         localItems = [];
         localItemsDirty = false;

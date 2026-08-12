@@ -85,10 +85,12 @@ def make_user(
         return cur.lastrowid
 
 
-def make_list(name="Groceries"):
+def make_list(name="Groceries", created_by=None):
     with _flask_app.app_context():
         db = get_db()
-        cur = db.execute("INSERT INTO lists (name) VALUES (?)", (name,))
+        cur = db.execute(
+            "INSERT INTO lists (name, created_by) VALUES (?, ?)", (name, created_by)
+        )
         db.commit()
         return cur.lastrowid
 

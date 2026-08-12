@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from app import app as flask_app, get_db
+from app import app as flask_app, get_db, upgrade_db
 from conftest import do_login, make_item, make_list, make_user
 
 
@@ -73,6 +73,18 @@ class TestRegister:
     def test_short_password_rejected(self, client):
         rv = client.post("/register", data={"username": "alice", "password": "ab"})
         assert rv.status_code == 400
+
+    def test_claims_ownerless_lists_for_initial_admin(self, client, app):
+        lid = make_list("Groceries")  # seeded before any user exists
+        client.post("/register", data={"username": "alice", "password": "pass1234"})
+        uid = db_query(app, "SELECT id FROM users WHERE username = 'alice'")["id"]
+        assert db_query(app, "SELECT created_by FROM lists WHERE id = ?", (lid,))[0] == uid
+
+    def test_initial_admin_can_delete_claimed_seed_list(self, client):
+        lid = make_list("Groceries")
+        make_list("Second")
+        client.post("/register", data={"username": "alice", "password": "pass1234"})
+        assert client.delete(f"/api/lists/{lid}").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +298,8 @@ class TestListsAPI:
         assert jpost(client, "/api/lists", {"name": "x" * 101}).status_code == 400
 
     def test_delete_list(self, client):
-        make_user()
-        lid = make_list("First")
+        uid = make_user()
+        lid = make_list("First", created_by=uid)
         make_list("Second")
         do_login(client)
         rv = client.delete(f"/api/lists/{lid}")
@@ -295,14 +307,109 @@ class TestListsAPI:
         assert rv.get_json()["ok"] is True
 
     def test_cannot_delete_last_list(self, client):
-        make_user()
-        lid = make_list("Only")
+        uid = make_user()
+        lid = make_list("Only", created_by=uid)
         do_login(client)
         assert client.delete(f"/api/lists/{lid}").status_code == 400
 
     def test_delete_list_requires_auth(self, client):
         lid = make_list()
         assert client.delete(f"/api/lists/{lid}").status_code == 401
+
+    def test_admin_can_delete_any_list(self, client):
+        make_user("admin", role="admin")
+        other = make_user("bob")
+        lid = make_list("Bob's list", created_by=other)
+        make_list("Second")
+        do_login(client, "admin")
+        assert client.delete(f"/api/lists/{lid}").status_code == 200
+
+    def test_non_creator_cannot_delete_list(self, client, app):
+        make_user("alice")
+        other = make_user("bob")
+        lid = make_list("Bob's list", created_by=other)
+        make_list("Second")
+        do_login(client, "alice")
+        rv = client.delete(f"/api/lists/{lid}")
+        assert rv.status_code == 403
+        assert db_query(app, "SELECT id FROM lists WHERE id = ?", (lid,))
+
+    def test_non_creator_delete_leaves_items_intact(self, client, app):
+        make_user("alice")
+        other = make_user("bob")
+        lid = make_list("Bob's list", created_by=other)
+        make_list("Second")
+        make_item(lid, "Milk")
+        do_login(client, "alice")
+        assert client.delete(f"/api/lists/{lid}").status_code == 403
+        assert db_query(app, "SELECT id FROM items WHERE list_id = ?", (lid,))
+
+    def test_creator_can_delete_own_list(self, client):
+        uid = make_user("alice")
+        lid = make_list("Alice's list", created_by=uid)
+        make_list("Second")
+        do_login(client, "alice")
+        assert client.delete(f"/api/lists/{lid}").status_code == 200
+
+    def test_legacy_ownerless_list_admin_only(self, client):
+        make_user("alice")
+        make_user("admin", role="admin")
+        lid = make_list("Legacy")
+        make_list("Second")
+        do_login(client, "alice")
+        assert client.delete(f"/api/lists/{lid}").status_code == 403
+
+    def test_delete_missing_list_404s(self, client):
+        make_user()
+        make_list("Only")
+        do_login(client)
+        assert client.delete("/api/lists/9999").status_code == 404
+
+    def test_get_reports_can_delete(self, client):
+        uid = make_user("alice")
+        other = make_user("bob")
+        mine = make_list("Mine", created_by=uid)
+        theirs = make_list("Theirs", created_by=other)
+        do_login(client, "alice")
+        flags = {d["id"]: d["can_delete"] for d in client.get("/api/lists").get_json()}
+        assert flags[mine] is True
+        assert flags[theirs] is False
+
+    def test_get_reports_can_delete_for_admin(self, client):
+        make_user("admin", role="admin")
+        other = make_user("bob")
+        theirs = make_list("Theirs", created_by=other)
+        do_login(client, "admin")
+        flags = {d["id"]: d["can_delete"] for d in client.get("/api/lists").get_json()}
+        assert flags[theirs] is True
+
+
+# ---------------------------------------------------------------------------
+# Schema upgrade / backfill
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerlessListBackfill:
+    def test_upgrade_assigns_ownerless_lists_to_first_admin(self, app):
+        make_user("bob")
+        first_admin = make_user("admin", role="admin")
+        make_user("admin2", role="admin")
+        lid = make_list("Legacy")
+        upgrade_db()
+        assert db_query(app, "SELECT created_by FROM lists WHERE id = ?", (lid,))[0] == first_admin
+
+    def test_upgrade_leaves_owned_lists_alone(self, app):
+        owner = make_user("bob")
+        make_user("admin", role="admin")
+        lid = make_list("Bob's list", created_by=owner)
+        upgrade_db()
+        assert db_query(app, "SELECT created_by FROM lists WHERE id = ?", (lid,))[0] == owner
+
+    def test_upgrade_without_admin_leaves_list_ownerless(self, app):
+        make_user("bob")
+        lid = make_list("Legacy")
+        upgrade_db()
+        assert db_query(app, "SELECT created_by FROM lists WHERE id = ?", (lid,))[0] is None
 
 
 # ---------------------------------------------------------------------------

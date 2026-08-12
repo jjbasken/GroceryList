@@ -118,6 +118,18 @@ def upgrade_db():
     # Ensure at least one list exists
     if db.execute("SELECT COUNT(*) FROM lists").fetchone()[0] == 0:
         db.execute("INSERT INTO lists (name) VALUES ('Groceries')")
+
+    # Adopt ownerless lists — the seeded 'Groceries' list and anything created
+    # before created_by was populated — into the first admin account, so that
+    # admin can delete them under the ownership rules in delete_list(). On a
+    # brand-new install there is no admin yet; register() does the same claim
+    # once the initial account is created.
+    db.execute(
+        "UPDATE lists SET created_by = ("
+        "  SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+        ") WHERE created_by IS NULL"
+        "  AND EXISTS (SELECT 1 FROM users WHERE role = 'admin')"
+    )
     db.commit()
 
     # --- Item column upgrades ---
@@ -211,6 +223,21 @@ def admin_required(f):
     return decorated
 
 
+def current_user_is_admin():
+    # Read the role from the DB rather than the session: roles can change after
+    # a cookie is issued, and admin_required does the same live lookup.
+    row = get_db().execute(
+        "SELECT role FROM users WHERE id = ?", (session.get("user_id"),)
+    ).fetchone()
+    return row is not None and row["role"] == "admin"
+
+
+def may_delete_list(created_by, is_admin):
+    # Lists created before per-list ownership existed have a NULL created_by,
+    # so only an admin can delete those.
+    return is_admin or (created_by is not None and created_by == session.get("user_id"))
+
+
 def safe_referrer():
     # The Referer header is request-controlled; redirecting to it blindly is an
     # open redirect. Only follow it back to our own host.
@@ -296,6 +323,9 @@ def register():
     session["role"] = user["role"]
     session["epoch"] = user["session_epoch"]
     session["must_change_password"] = False
+    # The seeded list is created before any user exists, so hand it to the
+    # initial admin (see the matching backfill in upgrade_db).
+    db.execute("UPDATE lists SET created_by = ? WHERE created_by IS NULL", (user["id"],))
     log_audit("user.register", f"Initial admin account '{username}' created")
     db.commit()
     return redirect(url_for("index"))
@@ -376,8 +406,13 @@ def csrf_token():
 @login_required
 def get_lists():
     db = get_db()
-    rows = db.execute("SELECT id, name FROM lists ORDER BY id").fetchall()
-    return jsonify([dict(r) for r in rows])
+    rows = db.execute("SELECT id, name, created_by FROM lists ORDER BY id").fetchall()
+    is_admin = current_user_is_admin()
+    return jsonify([
+        {"id": r["id"], "name": r["name"],
+         "can_delete": may_delete_list(r["created_by"], is_admin)}
+        for r in rows
+    ])
 
 
 @app.route("/api/lists", methods=["POST"])
@@ -402,13 +437,19 @@ def create_list():
 @login_required
 def delete_list(list_id):
     db = get_db()
+    lst = db.execute(
+        "SELECT name, created_by FROM lists WHERE id = ?", (list_id,)
+    ).fetchone()
+    if lst is None:
+        return jsonify({"error": "List not found"}), 404
+    if not may_delete_list(lst["created_by"], current_user_is_admin()):
+        return jsonify({"error": "Only an admin or the list's creator can delete it"}), 403
     count = db.execute("SELECT COUNT(*) FROM lists").fetchone()[0]
     if count <= 1:
         return jsonify({"error": "Cannot delete the last list"}), 400
-    lst = db.execute("SELECT name FROM lists WHERE id = ?", (list_id,)).fetchone()
     db.execute("DELETE FROM items WHERE list_id = ?", (list_id,))
     db.execute("DELETE FROM lists WHERE id = ?", (list_id,))
-    log_audit("list.delete", f"Deleted list '{lst['name'] if lst else list_id}'")
+    log_audit("list.delete", f"Deleted list '{lst['name']}'")
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
@@ -506,6 +547,9 @@ def add_item():
 # users collaborate on the same lists with equal write permissions. There is no
 # per-list membership model by design. If private lists are ever added, these
 # endpoints will need ownership checks before that feature ships.
+#
+# Deleting a whole list is the one exception: it is destructive and irreversible,
+# so it is restricted to admins and the list's creator (see delete_list above).
 
 @app.route("/api/items/<int:item_id>/toggle", methods=["POST"])
 @login_required
