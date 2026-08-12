@@ -623,7 +623,7 @@ def clear_bought():
 def change_password():
     db = get_db()
     user = db.execute(
-        "SELECT password_hash, must_change_password FROM users WHERE id = ?",
+        "SELECT password_hash, must_change_password, session_epoch FROM users WHERE id = ?",
         (session["user_id"],),
     ).fetchone()
     # Forced resets are exempt: the admin just set a temporary password the
@@ -651,11 +651,17 @@ def change_password():
         return render_template("change_password.html", require_current=require_current), 403
 
     pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    # Bump the epoch so cookies issued before the change stop authenticating.
+    # Changing your password is the standard reflex after a suspected
+    # compromise, so it has to actually evict whoever else is holding a session.
+    new_epoch = user["session_epoch"] + 1
     db.execute(
-        "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
-        (pw_hash, session["user_id"]),
+        "UPDATE users SET password_hash = ?, must_change_password = 0, "
+        "session_epoch = ? WHERE id = ?",
+        (pw_hash, new_epoch, session["user_id"]),
     )
     db.commit()
+    session["epoch"] = new_epoch          # keep the device that made the change
     session["must_change_password"] = False
     return redirect(url_for("index"))
 
@@ -723,7 +729,9 @@ def admin_disable_user(user_id):
 @admin_required
 def admin_reset_password(user_id):
     db = get_db()
-    user = db.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = db.execute(
+        "SELECT id, username, session_epoch FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
     if not user:
         return redirect(url_for("admin_users"))
 
@@ -739,12 +747,22 @@ def admin_reset_password(user_id):
         return render_template("admin_reset_password.html", user=user), 400
 
     pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    # Bump the epoch too. A reset is the remediation for a compromised account,
+    # so it must revoke the target's existing cookies -- otherwise the intruder
+    # keeps their session *and* inherits the must_change_password exemption in
+    # change_password(), letting them set a password of their own choosing.
+    new_epoch = user["session_epoch"] + 1
     db.execute(
-        "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
-        (pw_hash, user_id),
+        "UPDATE users SET password_hash = ?, must_change_password = 1, "
+        "session_epoch = ? WHERE id = ?",
+        (pw_hash, new_epoch, user_id),
     )
     log_audit("admin.password_reset", f"Reset password for user '{user['username']}'")
     db.commit()
+    if user_id == session["user_id"]:
+        # Self-reset: keep the session that issued it, as revoke-sessions does.
+        session["epoch"] = new_epoch
+        session["must_change_password"] = True
     return redirect(url_for("admin_users"))
 
 

@@ -858,6 +858,159 @@ class TestSessionRevocation:
 
 
 # ---------------------------------------------------------------------------
+# Password changes revoke sessions
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordChangeRevokesSessions:
+    """Setting a password -- by the user or by an admin -- must evict every
+    cookie issued before it. session_epoch is the only server-side lever for
+    this, so both write paths have to bump it."""
+
+    NEW = {"current": "pass1234", "password": "newpass99", "confirm": "newpass99"}
+
+    def _as_admin(self, client):
+        make_user("admin_user", role="admin")
+        do_login(client, "admin_user")
+
+    # --- self-service change ---
+
+    def test_change_password_logs_out_other_sessions(self, client, app):
+        make_user()
+        do_login(client)
+        other_device = app.test_client()
+        do_login(other_device, "alice")
+        assert other_device.get("/").status_code == 200
+
+        client.post("/change-password", data=self.NEW)
+
+        rv = other_device.get("/")
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+    def test_change_password_logs_out_other_api_sessions(self, client, app):
+        make_user()
+        do_login(client)
+        other_device = app.test_client()
+        do_login(other_device, "alice")
+        client.post("/change-password", data=self.NEW)
+        assert other_device.get("/api/lists").status_code == 401
+
+    def test_change_password_keeps_current_session(self, client, app):
+        """The device that made the change stays logged in."""
+        make_user()
+        do_login(client)
+        client.post("/change-password", data=self.NEW)
+        assert client.get("/").status_code == 200
+
+    def test_change_password_bumps_epoch(self, client, app):
+        make_user()
+        do_login(client)
+        client.post("/change-password", data=self.NEW)
+        row = db_query(app, "SELECT session_epoch FROM users WHERE username = 'alice'")
+        assert row["session_epoch"] == 1
+
+    def test_login_with_new_password_after_change(self, client, app):
+        """A fresh login picks up the bumped epoch and authenticates."""
+        make_user()
+        do_login(client)
+        client.post("/change-password", data=self.NEW)
+        fresh = app.test_client()
+        do_login(fresh, "alice", "newpass99")
+        assert fresh.get("/").status_code == 200
+
+    def test_failed_change_does_not_bump_epoch(self, client, app):
+        """A rejected change must not log the user out of anything."""
+        make_user()
+        do_login(client)
+        other_device = app.test_client()
+        do_login(other_device, "alice")
+        client.post(
+            "/change-password",
+            data={"current": "wrongpass", "password": "newpass99", "confirm": "newpass99"},
+        )
+        row = db_query(app, "SELECT session_epoch FROM users WHERE username = 'alice'")
+        assert row["session_epoch"] == 0
+        assert other_device.get("/").status_code == 200
+
+    # --- admin reset ---
+
+    def test_admin_reset_logs_out_target_sessions(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        bob_client = app.test_client()
+        do_login(bob_client, "bob")
+        assert bob_client.get("/").status_code == 200
+
+        client.post(f"/admin/users/{uid}/reset-password", data={"password": "temp12345"})
+
+        rv = bob_client.get("/")
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+    def test_admin_reset_bumps_target_epoch(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        client.post(f"/admin/users/{uid}/reset-password", data={"password": "temp12345"})
+        row = db_query(app, "SELECT session_epoch FROM users WHERE id = ?", (uid,))
+        assert row["session_epoch"] == 1
+
+    def test_stale_session_cannot_hijack_account_after_admin_reset(self, client, app):
+        """Regression: change_password() reads must_change_password from the DB,
+        so before the epoch bump an attacker holding a pre-reset cookie could
+        POST a password of their own choosing with no current-password check --
+        turning the admin's remediation into a full account takeover."""
+        self._as_admin(client)
+        uid = make_user("bob")
+        attacker = app.test_client()
+        do_login(attacker, "bob")
+
+        client.post(f"/admin/users/{uid}/reset-password", data={"password": "temp12345"})
+
+        rv = attacker.post(
+            "/change-password", data={"password": "pwned1234", "confirm": "pwned1234"}
+        )
+        assert rv.status_code == 302
+        assert "/login" in rv.location
+
+        # The attacker's password was never set; the admin's temp one still stands.
+        victim = app.test_client()
+        assert victim.post(
+            "/login", data={"username": "bob", "password": "pwned1234"}
+        ).status_code == 401
+        rv = do_login(victim, "bob", "temp12345")
+        assert rv.status_code == 302
+        assert "/change-password" in rv.location
+
+    def test_admin_self_reset_keeps_current_session(self, client, app):
+        """Resetting your own password shouldn't log you out mid-request."""
+        self._as_admin(client)
+        admin_id = db_query(app, "SELECT id FROM users WHERE username = 'admin_user'")["id"]
+        client.post(f"/admin/users/{admin_id}/reset-password", data={"password": "temp12345"})
+        assert client.get("/admin/users").status_code == 200
+
+    def test_admin_reset_does_not_touch_other_users_sessions(self, client, app):
+        self._as_admin(client)
+        uid = make_user("bob")
+        make_user("carol")
+        carol_client = app.test_client()
+        do_login(carol_client, "carol")
+        client.post(f"/admin/users/{uid}/reset-password", data={"password": "temp12345"})
+        assert carol_client.get("/").status_code == 200
+
+    def test_failed_admin_reset_does_not_bump_epoch(self, client, app):
+        """A rejected reset (too-short password) must not revoke sessions."""
+        self._as_admin(client)
+        uid = make_user("bob")
+        bob_client = app.test_client()
+        do_login(bob_client, "bob")
+        client.post(f"/admin/users/{uid}/reset-password", data={"password": "ab"})
+        row = db_query(app, "SELECT session_epoch FROM users WHERE id = ?", (uid,))
+        assert row["session_epoch"] == 0
+        assert bob_client.get("/").status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Security headers
 # ---------------------------------------------------------------------------
 
