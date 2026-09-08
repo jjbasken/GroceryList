@@ -79,6 +79,10 @@ def set_security_headers(response):
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data:; connect-src 'self'"
     )
+    if not request.path.startswith("/static/") and request.endpoint != "service_worker":
+        response.headers["Cache-Control"] = "no-store"
+    if getattr(g, "user", None) is not None:
+        response.headers["X-Account-ID"] = g.user["account_id"]
     return response
 
 
@@ -102,6 +106,22 @@ def upgrade_db():
         db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
     if 'session_epoch' not in cols:
         db.execute("ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
+
+    # A random, immutable identity prevents deleted-row ID reuse from reviving
+    # cookies. Legacy cookies lack this value and must authenticate again.
+    if 'account_id' not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN account_id TEXT")
+    db.execute("UPDATE users SET account_id = lower(hex(randomblob(16))) WHERE account_id IS NULL")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_account_id ON users(account_id)")
+    # ALTER TABLE cannot add a random expression default to a populated table.
+    # The trigger also covers future inserts into upgraded databases.
+    db.execute("""
+        CREATE TRIGGER IF NOT EXISTS users_assign_account_id AFTER INSERT ON users
+        WHEN NEW.account_id IS NULL
+        BEGIN
+            UPDATE users SET account_id = lower(hex(randomblob(16))) WHERE id = NEW.id;
+        END
+    """)
 
     # --- Lists table (old DBs won't have it) ---
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -188,36 +208,45 @@ def auth_failure():
     return redirect(url_for("login"))
 
 
+def validate_session():
+    user = get_db().execute(
+        "SELECT id, role, is_active, session_epoch, account_id, must_change_password "
+        "FROM users WHERE id = ?", (session.get("user_id"),)
+    ).fetchone()
+    if (not user or user["is_active"] != 1
+            or session.get("epoch") != user["session_epoch"]
+            or session.get("account_id") != user["account_id"]):
+        session.clear()
+        return auth_failure()
+    g.user = user
+    # Bind browser writes to the account that rendered the page. This also
+    # protects old tabs and offline queues after another account signs in.
+    expected_account = request.headers.get("X-Account-ID")
+    requires_account = request.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS")
+    if (requires_account or expected_account is not None) and expected_account != user["account_id"]:
+        return jsonify({"error": "account_changed"}), 409
+    if user["must_change_password"] and request.endpoint not in ("change_password", "csrf_token"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "password_change_required"}), 403
+        return redirect(url_for("change_password"))
+    return None
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "user_id" not in session:
-            return auth_failure()
-        # Re-validate is_active + session_epoch on every request (cheap indexed
-        # lookup). Flask sessions live client-side, so the epoch column is the
-        # server's only lever to invalidate already-issued cookies.
-        user = get_db().execute(
-            "SELECT is_active, session_epoch FROM users WHERE id = ?", (session["user_id"],)
-        ).fetchone()
-        if not user or user["is_active"] != 1 or session.get("epoch") != user["session_epoch"]:
-            session.clear()
-            return auth_failure()
+        failure = validate_session()
+        if failure is not None:
+            return failure
         return f(*args, **kwargs)
     return decorated
 
 
 def admin_required(f):
     @wraps(f)
+    @login_required
     def decorated(*args, **kwargs):
-        if "user_id" not in session:
-            return auth_failure()
-        user = get_db().execute(
-            "SELECT is_active, role, session_epoch FROM users WHERE id = ?", (session["user_id"],)
-        ).fetchone()
-        if not user or user["is_active"] != 1 or session.get("epoch") != user["session_epoch"]:
-            session.clear()
-            return auth_failure()
-        if user["role"] != "admin":
+        if g.user["role"] != "admin":
             return redirect(url_for("index"))
         return f(*args, **kwargs)
     return decorated
@@ -317,11 +346,12 @@ def register():
         "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, pw_hash),
     )
-    user = db.execute("SELECT id, role, session_epoch FROM users WHERE username = ?", (username,)).fetchone()
+    user = db.execute("SELECT id, role, session_epoch, account_id FROM users WHERE username = ?", (username,)).fetchone()
     session["user_id"] = user["id"]
     session["username"] = username
     session["role"] = user["role"]
     session["epoch"] = user["session_epoch"]
+    session["account_id"] = user["account_id"]
     session["must_change_password"] = False
     # The seeded list is created before any user exists, so hand it to the
     # initial admin (see the matching backfill in upgrade_db).
@@ -361,6 +391,7 @@ def login():
         session["username"] = user["username"]
         session["role"] = user["role"]
         session["epoch"] = user["session_epoch"]
+        session["account_id"] = user["account_id"]
         session["must_change_password"] = bool(user["must_change_password"])
         if user["must_change_password"]:
             return redirect(url_for("change_password"))
@@ -385,8 +416,6 @@ def logout():
 def index():
     if not has_users():
         return redirect(url_for("register"))
-    if session.get("must_change_password"):
-        return redirect(url_for("change_password"))
     return render_template("list.html", username=session["username"],
                            is_admin=(session.get("role") == "admin"))
 
@@ -840,6 +869,8 @@ def admin_delete_user(user_id):
     db = get_db()
     target = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
     db.execute("UPDATE items SET added_by = NULL WHERE added_by = ?", (user_id,))
+    db.execute("UPDATE lists SET created_by = NULL WHERE created_by = ?", (user_id,))
+    db.execute("UPDATE audit_log SET actor_id = NULL WHERE actor_id = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     if target:
         log_audit("admin.user_delete", f"Deleted user '{target['username']}'")

@@ -83,6 +83,23 @@ Navigate to `/admin` (admin users only) to:
 - Force a password reset on next login
 - View the audit log of all actions
 
+## Security upgrade and offline storage
+
+The account-identity migration runs automatically on startup. Existing users
+must sign in again once after upgrading. Let connected devices finish syncing
+before deploying: the updated service worker removes legacy offline caches and
+queued changes because they cannot safely be assigned to an account.
+
+Offline data belongs to the account that loaded the page. Logout, sign-in,
+password changes, and account switches clear private browser caches and pending
+changes. API writes require an `X-Account-ID` header matching the authenticated
+account, in addition to the CSRF token. The frontend sets both automatically;
+custom API clients can obtain the account identity from the `X-Account-ID`
+response header on `/api/csrf-token`.
+
+Run backend regressions with `python -m pytest -q` and browser-script regressions
+with `node tests/offline-security.test.js` (Node.js 22 or newer).
+
 ## Project Structure
 
 ```

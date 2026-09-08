@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icon-192.png') }}">
+    <script src="{{ url_for('static', filename='offline-security.js') }}" defer></script>
     {% block head %}{% endblock %}
 </head>
 <body>

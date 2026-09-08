@@ -108,4 +108,9 @@ def make_item(list_id, name="Milk", section="now", is_bought=0, added_by=None):
 
 
 def do_login(client, username="alice", password="pass1234"):
-    return client.post("/login", data={"username": username, "password": password})
+    response = client.post("/login", data={"username": username, "password": password})
+    # Model the account-bound header sent by the rendered app page.
+    with client.session_transaction() as session:
+        if "account_id" in session:
+            client.environ_base["HTTP_X_ACCOUNT_ID"] = session["account_id"]
+    return response

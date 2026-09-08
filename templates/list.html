@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block head %}
+<meta name="account-id" content="{{ g.user.account_id }}">
 <meta name="username" content="{{ username }}">
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 {% endblock %}
