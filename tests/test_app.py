@@ -84,7 +84,9 @@ class TestRegister:
         lid = make_list("Groceries")
         make_list("Second")
         client.post("/register", data={"username": "alice", "password": "pass1234"})
-        assert client.delete(f"/api/lists/{lid}").status_code == 200
+        with client.session_transaction() as session:
+            account = session["account_id"]
+        assert client.delete(f"/api/lists/{lid}", headers={"X-Account-ID": account}).status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -169,11 +171,12 @@ class TestIndex:
         rv = client.get("/")
         assert rv.status_code == 200
 
-    def test_must_change_password_flag_redirects(self, client):
+    def test_must_change_password_flag_redirects(self, client, app):
         make_user()
         do_login(client)
-        with client.session_transaction() as sess:
-            sess["must_change_password"] = True
+        with app.app_context():
+            get_db().execute("UPDATE users SET must_change_password = 1")
+            get_db().commit()
         rv = client.get("/")
         assert rv.status_code == 302
         assert "/change-password" in rv.location
@@ -1094,7 +1097,8 @@ class TestPasswordChangeRevokesSessions:
         self._as_admin(client)
         admin_id = db_query(app, "SELECT id FROM users WHERE username = 'admin_user'")["id"]
         client.post(f"/admin/users/{admin_id}/reset-password", data={"password": "temp12345"})
-        assert client.get("/admin/users").status_code == 200
+        assert client.get("/admin/users").location.endswith("/change-password")
+        assert client.get("/change-password").status_code == 200
 
     def test_admin_reset_does_not_touch_other_users_sessions(self, client, app):
         self._as_admin(client)

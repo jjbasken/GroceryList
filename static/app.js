@@ -6,6 +6,8 @@
     const usernameMeta = document.querySelector('meta[name="username"]');
     const currentUsername = usernameMeta ? usernameMeta.content : '';
 
+    const accountId = document.querySelector('meta[name="account-id"]').content;
+
     // ---- Local state ----
     let localItems = [];
     let localItemsDirty = false;
@@ -102,8 +104,8 @@
 
     async function refreshCsrfToken() {
         try {
-            const res = await fetch('/api/csrf-token');
-            if (res.status === 401) { window.location.href = '/login'; return false; }
+            const res = await fetch('/api/csrf-token', { headers: { 'X-Account-ID': accountId } });
+            if (res.status === 401 || res.status === 409) { window.location.href = '/login'; return false; }
             const data = await res.json();
             if (data && data.token) { csrfToken = data.token; return true; }
         } catch (e) { /* offline -- keep the old token */ }
@@ -120,10 +122,10 @@
         const method = (opts.method || 'GET').toUpperCase();
         const doFetch = () => fetch(url, {
             ...opts,
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, ...opts.headers },
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId, ...opts.headers },
         });
         const queueOp = async () => {
-            await pushQueue({ method, url, body: opts.body || null });
+            await pushQueue({ accountId, method, url, body: opts.body || null });
             applyOptimistic(method, url, opts.body || null);
             return { ok: true };
         };
@@ -148,7 +150,14 @@
             }
         }
 
-        if (res.status === 401) { window.location.href = '/login'; return null; }
+        if (res.status === 401 || res.status === 409) { window.location.href = '/login'; return null; }
+        if (res.status === 403) {
+            const error = await res.clone().json().catch(() => null);
+            if (error && error.error === 'password_change_required') {
+                window.location.href = '/change-password';
+                return null;
+            }
+        }
         return res.json().catch(() => null);
     }
 
@@ -162,9 +171,14 @@
         for (let i = 0; i < ops.length; i++) {
             const op = ops[i];
             const key = keys[i];
+            // Legacy operations have no identity and cannot safely be replayed.
+            if (op.accountId !== accountId) {
+                await deleteQueueEntry(key);
+                continue;
+            }
             const replay = () => fetch(op.url, {
                 method: op.method,
-                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId },
                 body: op.body || undefined,
             });
             try {
@@ -174,11 +188,19 @@
                 if (await isCsrfFailure(res) && await refreshCsrfToken()) {
                     res = await replay();
                 }
-                if (res.status === 401) {
+                if (res.status === 401 || res.status === 409) {
                     showSyncIndicator(false);
                     window.location.href = '/login';
                     return;
                 }
+                if (res.status === 403) {
+                    const error = await res.clone().json().catch(() => null);
+                    if (error && error.error === 'password_change_required') {
+                        window.location.href = '/change-password';
+                        return;
+                    }
+                }
+                if (res.status >= 500) break;
                 // Remove on 2xx or 4xx (conflict/gone -- no retry for client errors)
                 await deleteQueueEntry(key);
             } catch (e) {
