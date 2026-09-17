@@ -345,25 +345,23 @@
         document.getElementById("add-to-list-cancel").addEventListener("click", closeModal);
         document.getElementById("add-to-list-confirm").addEventListener("click", async () => {
             const checked = Array.from(modal.querySelectorAll('.checklist input[type="checkbox"]:checked'))
-                .map((cb) => recipe.ingredients[Number(cb.dataset.idx)].text);
+                .map((cb) => recipe.ingredients[Number(cb.dataset.idx)].id);
             if (checked.length === 0) { closeModal(); return; }
             const listId = Number(document.getElementById("add-to-list-select").value);
             const section = document.getElementById("add-to-list-section").value;
             const confirmBtn = document.getElementById("add-to-list-confirm");
             confirmBtn.disabled = true;
             try {
-                for (const text of checked) {
-                    const res = await api("/api/items", {
-                        method: "POST",
-                        body: JSON.stringify({ name: text, section, list_id: listId }),
-                    });
-                    if (!res.ok) throw new Error("add_failed");
-                }
+                const res = await api(`/api/recipes/${recipeId}/add-to-list`, {
+                    method: "POST",
+                    body: JSON.stringify({ ingredient_ids: checked, section, list_id: listId }),
+                });
+                if (!res.ok) throw new Error("add_failed");
                 closeModal();
             } catch (e) {
                 const errorEl = document.getElementById("add-to-list-error");
                 errorEl.hidden = false;
-                errorEl.textContent = "Could not add all items -- check your connection and try again.";
+                errorEl.textContent = "Could not add ingredients -- check your connection and try again.";
                 confirmBtn.disabled = false;
             }
         });
