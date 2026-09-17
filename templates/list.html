@@ -10,6 +10,7 @@
 <header>
     <h1>GroceryList</h1>
     <div class="header-actions">
+        <a href="{{ url_for('recipes') }}" class="admin-btn">Recipes</a>
         {% if is_admin %}
         <a href="{{ url_for('admin_users') }}" class="admin-btn">Admin</a>
         {% endif %}
