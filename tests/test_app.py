@@ -881,6 +881,20 @@ class TestAdminUsers:
         row = db_query(app, "SELECT added_by FROM items WHERE id = ?", (iid,))
         assert row["added_by"] is None
 
+    def test_delete_user_nullifies_recipe_attribution(self, client, app):
+        """Recipes remain usable after their creator is deleted."""
+        self._as_admin(client)
+        uid = make_user("bob")
+        recipe_id = make_recipe(created_by=uid)
+
+        rv = client.post(f"/admin/users/{uid}/delete")
+
+        assert rv.status_code == 302
+        assert db_query(app, "SELECT id FROM users WHERE id = ?", (uid,)) is None
+        recipe = db_query(app, "SELECT created_by FROM recipes WHERE id = ?", (recipe_id,))
+        assert recipe is not None
+        assert recipe["created_by"] is None
+
     def test_disable_user_blocks_further_requests(self, client, app):
         """A user disabled mid-session cannot access protected routes."""
         self._as_admin(client)
@@ -1397,6 +1411,47 @@ class TestRecipesAPI:
         do_login(client, "admin")
         assert client.delete(f"/api/recipes/{rid}").status_code == 200
 
+    def test_add_selected_ingredients_to_list_atomically(self, client, app):
+        uid = make_user()
+        list_id = make_list()
+        recipe_id = make_recipe(ingredients=["Flour", "Eggs", "Milk"], created_by=uid)
+        ingredient_ids = [row["id"] for row in db_all(
+            app,
+            "SELECT id FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
+            (recipe_id,),
+        )]
+        do_login(client)
+
+        rv = jpost(client, f"/api/recipes/{recipe_id}/add-to-list", {
+            "list_id": list_id,
+            "section": "later",
+            "ingredient_ids": ingredient_ids[:2],
+        })
+
+        assert rv.status_code == 201
+        rows = db_all(app, "SELECT name, section FROM items ORDER BY id")
+        assert [(row["name"], row["section"]) for row in rows] == [
+            ("Flour", "later"), ("Eggs", "later"),
+        ]
+
+    def test_add_ingredients_rejects_entire_invalid_selection(self, client, app):
+        uid = make_user()
+        list_id = make_list()
+        recipe_id = make_recipe(ingredients=["Flour", "Eggs"], created_by=uid)
+        ingredient_id = db_query(
+            app, "SELECT id FROM recipe_ingredients WHERE recipe_id = ? LIMIT 1", (recipe_id,)
+        )["id"]
+        do_login(client)
+
+        rv = jpost(client, f"/api/recipes/{recipe_id}/add-to-list", {
+            "list_id": list_id,
+            "section": "now",
+            "ingredient_ids": [ingredient_id, 999999],
+        })
+
+        assert rv.status_code == 400
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 0
+
 
 # ---------------------------------------------------------------------------
 # Recipe URL import
@@ -1461,6 +1516,24 @@ class TestRecipeUrlImport:
             rv = jpost(client, "/api/recipes/extract-url", {"url": "http://localhost/recipe"})
         assert rv.status_code == 400
         mock_get.assert_not_called()
+
+    def test_rejects_shared_address_space(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        with patch("app.socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.64.0.1", 0))
+        ]), patch("app.requests.Session.get") as mock_get:
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://internal.example/"})
+        assert rv.status_code == 400
+        mock_get.assert_not_called()
+
+    def test_malformed_port_is_rejected(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com:notaport/"})
+        assert rv.status_code == 400
 
     def test_happy_path_extracts_without_saving(self, client, app, monkeypatch):
         make_user()

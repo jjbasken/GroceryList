@@ -189,7 +189,7 @@ def upgrade_db():
                 name TEXT NOT NULL,
                 notes TEXT,
                 steps TEXT,
-                created_by INTEGER REFERENCES users(id),
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             )
@@ -896,6 +896,57 @@ def delete_recipe(recipe_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/recipes/<int:recipe_id>/add-to-list", methods=["POST"])
+@login_required
+def add_recipe_to_list(recipe_id):
+    """Atomically add selected recipe ingredients to a grocery list."""
+    data = request.get_json() or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid format"}), 400
+
+    list_id = data.get("list_id")
+    section = data.get("section", "now")
+    ingredient_ids = data.get("ingredient_ids")
+    if type(list_id) is not int:
+        return jsonify({"error": "List is required"}), 400
+    if section not in ("now", "later"):
+        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+    if (not isinstance(ingredient_ids, list) or not ingredient_ids or len(ingredient_ids) > 200
+            or any(type(value) is not int for value in ingredient_ids)
+            or len(set(ingredient_ids)) != len(ingredient_ids)):
+        return jsonify({"error": "Select at least one valid ingredient"}), 400
+
+    db = get_db()
+    if db.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
+        return jsonify({"error": "Recipe not found"}), 404
+    if db.execute("SELECT id FROM lists WHERE id = ?", (list_id,)).fetchone() is None:
+        return jsonify({"error": "List not found"}), 404
+
+    placeholders = ",".join("?" for _ in ingredient_ids)
+    ingredients = db.execute(
+        f"SELECT id, text FROM recipe_ingredients "
+        f"WHERE recipe_id = ? AND id IN ({placeholders})",
+        (recipe_id, *ingredient_ids),
+    ).fetchall()
+    if len(ingredients) != len(ingredient_ids):
+        return jsonify({"error": "Invalid ingredient selection"}), 400
+
+    text_by_id = {row["id"]: row["text"] for row in ingredients}
+    texts = [text_by_id[ingredient_id] for ingredient_id in ingredient_ids]
+    with db:
+        db.executemany(
+            "INSERT INTO items (name, section, list_id, added_by) VALUES (?, ?, ?, ?)",
+            [(text, section, list_id, session["user_id"]) for text in texts],
+        )
+        db.executemany(
+            "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
+            "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
+            [(text,) for text in texts],
+        )
+    broadcast("update")
+    return jsonify({"added": len(texts)}), 201
+
+
 # --- Recipe URL import (fetch a page, ask an LLM to extract the recipe) ---
 #
 # This endpoint never writes to the database -- it only returns extracted
@@ -928,12 +979,16 @@ _RECIPE_EXTRACTION_PROMPT = (
 
 def _parse_recipe_url(url):
     """Validate URL shape (scheme/hostname/port). Returns the parsed URL, or None."""
-    parts = urlparse(url)
+    try:
+        parts = urlparse(url)
+        port = parts.port
+    except ValueError:
+        return None
     if parts.scheme not in ("http", "https"):
         return None
     if not parts.hostname:
         return None
-    if parts.port not in (None, 80, 443):
+    if port not in (None, 80, 443):
         return None
     return parts
 
@@ -955,8 +1010,9 @@ def _resolve_safe_ip(hostname):
         return None
     ip = infos[0][4][0]
     addr = ipaddress.ip_address(ip)
-    if (addr.is_private or addr.is_loopback or addr.is_link_local
-            or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+    # is_global also rejects shared address space such as 100.64.0.0/10,
+    # which may expose carrier-grade NAT or overlay-network services.
+    if not addr.is_global or addr.is_multicast or addr.is_reserved:
         return None
     return ip
 
@@ -1331,6 +1387,9 @@ def admin_delete_user(user_id):
     target = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
     db.execute("UPDATE items SET added_by = NULL WHERE added_by = ?", (user_id,))
     db.execute("UPDATE lists SET created_by = NULL WHERE created_by = ?", (user_id,))
+    # Upgraded databases retain the original recipes table definition, so
+    # clear ownership explicitly as well as using ON DELETE SET NULL on new DBs.
+    db.execute("UPDATE recipes SET created_by = NULL WHERE created_by = ?", (user_id,))
     db.execute("UPDATE audit_log SET actor_id = NULL WHERE actor_id = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     if target:

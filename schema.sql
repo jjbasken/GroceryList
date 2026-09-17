@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     name TEXT NOT NULL,
     notes TEXT,
     steps TEXT,
-    created_by INTEGER REFERENCES users(id),
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
