@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block head %}
+<meta name="account-id" content="{{ g.user.account_id }}">
+<meta name="username" content="{{ username }}">
+<meta name="import-url-enabled" content="{{ 'true' if import_url_enabled else 'false' }}">
+<script src="{{ url_for('static', filename='recipes.js') }}" defer></script>
+{% endblock %}
+{% block body %}
+<header>
+    <h1>Recipes</h1>
+    <div class="header-actions">
+        <a href="{{ url_for('index') }}" class="logout-btn">Back to list</a>
+    </div>
+</header>
+
+<div class="recipes-toolbar">
+    <button id="new-recipe-btn" class="admin-action-btn btn-ok">+ New Recipe</button>
+    <button id="import-recipe-btn" class="admin-action-btn">Import</button>
+</div>
+
+<main class="recipes-main">
+    <ul id="recipe-list" class="recipe-list"></ul>
+    <p id="recipes-empty" class="empty-msg" hidden>No recipes yet — add one to get started.</p>
+</main>
+
+<div id="modal-overlay" class="modal-overlay" hidden>
+    <div id="modal" class="modal" role="dialog" aria-modal="true"></div>
+</div>
+{% endblock %}
