@@ -5,11 +5,13 @@ Covers: auth, lists API, items API, item history, change-password,
         admin user management, security headers, auth guards, and PWA endpoints.
 """
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import config
 from app import app as flask_app, get_db, upgrade_db
-from conftest import do_login, make_item, make_list, make_user
+from conftest import do_login, make_item, make_list, make_recipe, make_user
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,11 @@ def db_query(app, sql, params=()):
 def db_count(app, sql, params=()):
     with app.app_context():
         return get_db().execute(sql, params).fetchone()[0]
+
+
+def db_all(app, sql, params=()):
+    with app.app_context():
+        return get_db().execute(sql, params).fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +881,20 @@ class TestAdminUsers:
         row = db_query(app, "SELECT added_by FROM items WHERE id = ?", (iid,))
         assert row["added_by"] is None
 
+    def test_delete_user_nullifies_recipe_attribution(self, client, app):
+        """Recipes remain usable after their creator is deleted."""
+        self._as_admin(client)
+        uid = make_user("bob")
+        recipe_id = make_recipe(created_by=uid)
+
+        rv = client.post(f"/admin/users/{uid}/delete")
+
+        assert rv.status_code == 302
+        assert db_query(app, "SELECT id FROM users WHERE id = ?", (uid,)) is None
+        recipe = db_query(app, "SELECT created_by FROM recipes WHERE id = ?", (recipe_id,))
+        assert recipe is not None
+        assert recipe["created_by"] is None
+
     def test_disable_user_blocks_further_requests(self, client, app):
         """A user disabled mid-session cannot access protected routes."""
         self._as_admin(client)
@@ -1258,3 +1279,347 @@ class TestPWAEndpoints:
         rv = client.get("/manifest.webmanifest")
         assert rv.status_code == 200
         assert "manifest" in rv.headers.get("Content-Type", "")
+
+
+# ---------------------------------------------------------------------------
+# Recipes API
+# ---------------------------------------------------------------------------
+
+
+class TestRecipesAPI:
+    def test_requires_auth(self, client):
+        assert client.get("/api/recipes").status_code == 401
+
+    def test_get_returns_empty_list(self, client):
+        make_user()
+        do_login(client)
+        assert client.get("/api/recipes").get_json() == []
+
+    def test_create_recipe(self, client, app):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/recipes", {
+            "name": "Pancakes",
+            "notes": "Kids loved these",
+            "ingredients": ["2 cups flour", "1 egg", "  "],
+            "steps": ["Mix", "Cook"],
+        })
+        assert rv.status_code == 201
+        recipe_id = rv.get_json()["id"]
+        row = db_query(app, "SELECT name, notes, steps FROM recipes WHERE id = ?", (recipe_id,))
+        assert row["name"] == "Pancakes"
+        assert row["notes"] == "Kids loved these"
+        assert row["steps"] == "Mix\nCook"
+        texts = [r["text"] for r in db_all(
+            app, "SELECT text FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id", (recipe_id,)
+        )]
+        assert texts == ["2 cups flour", "1 egg"]  # blank line dropped
+
+    def test_create_recipe_requires_name(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/recipes", {"name": "", "ingredients": ["Flour"]})
+        assert rv.status_code == 400
+
+    def test_create_recipe_requires_ingredient(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/recipes", {"name": "Empty", "ingredients": []})
+        assert rv.status_code == 400
+
+    def test_create_recipe_name_too_long_rejected(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/recipes", {"name": "x" * 201, "ingredients": ["Flour"]})
+        assert rv.status_code == 400
+
+    def test_create_recipe_too_many_ingredients_rejected(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/recipes", {"name": "Big", "ingredients": ["x"] * 201})
+        assert rv.status_code == 400
+
+    def test_get_recipe_detail(self, client):
+        uid = make_user()
+        rid = make_recipe(name="Soup", notes="Good", steps=["Chop", "Simmer"],
+                           ingredients=["Carrots", "Broth"], created_by=uid)
+        do_login(client)
+        rv = client.get(f"/api/recipes/{rid}")
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["name"] == "Soup"
+        assert data["steps"] == "Chop\nSimmer"
+        assert [i["text"] for i in data["ingredients"]] == ["Carrots", "Broth"]
+        assert data["can_delete"] is True
+
+    def test_get_recipe_not_found(self, client):
+        make_user()
+        do_login(client)
+        assert client.get("/api/recipes/999").status_code == 404
+
+    def test_update_recipe_replaces_ingredients(self, client, app):
+        uid = make_user()
+        rid = make_recipe(ingredients=["Old1", "Old2"], created_by=uid)
+        do_login(client)
+        rv = jput(client, f"/api/recipes/{rid}", {
+            "name": "Updated", "notes": None, "steps": ["Step1"], "ingredients": ["New1"],
+        })
+        assert rv.status_code == 200
+        texts = [r["text"] for r in db_all(
+            app, "SELECT text FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id", (rid,)
+        )]
+        assert texts == ["New1"]
+
+    def test_update_recipe_not_found(self, client):
+        make_user()
+        do_login(client)
+        rv = jput(client, "/api/recipes/999", {"name": "X", "ingredients": ["Y"]})
+        assert rv.status_code == 404
+
+    def test_delete_recipe_by_creator(self, client, app):
+        uid = make_user()
+        rid = make_recipe(created_by=uid)
+        do_login(client)
+        rv = client.delete(f"/api/recipes/{rid}")
+        assert rv.status_code == 200
+        assert db_query(app, "SELECT id FROM recipes WHERE id = ?", (rid,)) is None
+
+    def test_delete_recipe_cascades_ingredients(self, client, app):
+        uid = make_user()
+        rid = make_recipe(created_by=uid, ingredients=["A", "B"])
+        do_login(client)
+        client.delete(f"/api/recipes/{rid}")
+        assert db_count(app, "SELECT COUNT(*) FROM recipe_ingredients WHERE recipe_id = ?", (rid,)) == 0
+
+    def test_delete_recipe_requires_auth(self, client):
+        rid = make_recipe()
+        assert client.delete(f"/api/recipes/{rid}").status_code == 401
+
+    def test_non_creator_cannot_delete_recipe(self, client, app):
+        make_user("alice")
+        other = make_user("bob")
+        rid = make_recipe(created_by=other)
+        do_login(client, "alice")
+        rv = client.delete(f"/api/recipes/{rid}")
+        assert rv.status_code == 403
+        assert db_query(app, "SELECT id FROM recipes WHERE id = ?", (rid,))
+
+    def test_admin_can_delete_any_recipe(self, client):
+        make_user("admin", role="admin")
+        other = make_user("bob")
+        rid = make_recipe(created_by=other)
+        do_login(client, "admin")
+        assert client.delete(f"/api/recipes/{rid}").status_code == 200
+
+    def test_add_selected_ingredients_to_list_atomically(self, client, app):
+        uid = make_user()
+        list_id = make_list()
+        recipe_id = make_recipe(ingredients=["Flour", "Eggs", "Milk"], created_by=uid)
+        ingredient_ids = [row["id"] for row in db_all(
+            app,
+            "SELECT id FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
+            (recipe_id,),
+        )]
+        do_login(client)
+
+        rv = jpost(client, f"/api/recipes/{recipe_id}/add-to-list", {
+            "list_id": list_id,
+            "section": "later",
+            "ingredient_ids": ingredient_ids[:2],
+        })
+
+        assert rv.status_code == 201
+        rows = db_all(app, "SELECT name, section FROM items ORDER BY id")
+        assert [(row["name"], row["section"]) for row in rows] == [
+            ("Flour", "later"), ("Eggs", "later"),
+        ]
+
+    def test_add_ingredients_rejects_entire_invalid_selection(self, client, app):
+        uid = make_user()
+        list_id = make_list()
+        recipe_id = make_recipe(ingredients=["Flour", "Eggs"], created_by=uid)
+        ingredient_id = db_query(
+            app, "SELECT id FROM recipe_ingredients WHERE recipe_id = ? LIMIT 1", (recipe_id,)
+        )["id"]
+        do_login(client)
+
+        rv = jpost(client, f"/api/recipes/{recipe_id}/add-to-list", {
+            "list_id": list_id,
+            "section": "now",
+            "ingredient_ids": [ingredient_id, 999999],
+        })
+
+        assert rv.status_code == 400
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 0
+
+
+# ---------------------------------------------------------------------------
+# Recipe URL import
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Minimal stand-in for requests.Response, used to avoid real network calls."""
+
+    def __init__(self, status_code=200, headers=None, chunks=None, encoding="utf-8"):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = chunks or []
+        self.encoding = encoding
+        self.closed = False
+
+    def iter_content(self, chunk_size=8192):
+        for chunk in self._chunks:
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_getaddrinfo(host, *args, **kwargs):
+    """Resolves loopback names normally, everything else to a fixed public IP.
+
+    Keeps SSRF-guard tests hermetic (no real DNS lookups) while still letting
+    the redirect-to-a-private-address test exercise the real loopback check.
+    """
+    if host in ("127.0.0.1", "localhost"):
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+    return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+
+class TestRecipeUrlImport:
+    def test_requires_auth(self, client):
+        rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
+        assert rv.status_code == 401
+
+    def test_not_configured_returns_501(self, client):
+        make_user()
+        do_login(client)
+        assert config.ANTHROPIC_API_KEY is None
+        rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
+        assert rv.status_code == 501
+
+    def test_rejects_literal_private_ip(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        with patch("app.requests.Session.get") as mock_get:
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://127.0.0.1/recipe"})
+        assert rv.status_code == 400
+        mock_get.assert_not_called()
+
+    def test_rejects_localhost_hostname(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        with patch("app.requests.Session.get") as mock_get:
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://localhost/recipe"})
+        assert rv.status_code == 400
+        mock_get.assert_not_called()
+
+    def test_rejects_shared_address_space(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        with patch("app.socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.64.0.1", 0))
+        ]), patch("app.requests.Session.get") as mock_get:
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://internal.example/"})
+        assert rv.status_code == 400
+        mock_get.assert_not_called()
+
+    def test_malformed_port_is_rejected(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com:notaport/"})
+        assert rv.status_code == 400
+
+    def test_happy_path_extracts_without_saving(self, client, app, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        page = _FakeResponse(
+            status_code=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            chunks=[b"<html><body><h1>Pancakes</h1></body></html>"],
+        )
+        extracted = {
+            "name": "Pancakes", "notes": "Fluffy",
+            "ingredients": ["2 cups flour", "1 egg"], "steps": ["Mix", "Cook"],
+        }
+        block = MagicMock(type="text", text=json.dumps(extracted))
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = MagicMock(content=[block])
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=page), \
+             patch("app.anthropic.Anthropic", return_value=fake_client):
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["name"] == "Pancakes"
+        assert data["ingredients"] == ["2 cups flour", "1 egg"]
+        assert data["steps"] == ["Mix", "Cook"]
+        assert db_count(app, "SELECT COUNT(*) FROM recipes") == 0
+
+    def test_redirect_to_private_ip_rejected(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        redirect_resp = _FakeResponse(status_code=302, headers={"Location": "http://127.0.0.1/internal"})
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=redirect_resp) as mock_get:
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
+        assert rv.status_code == 502
+        mock_get.assert_called_once()
+
+    def test_non_html_response_rejected(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        page = _FakeResponse(status_code=200, headers={"Content-Type": "application/pdf"}, chunks=[b"%PDF"])
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=page):
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe.pdf"})
+        assert rv.status_code == 502
+
+    def test_oversized_response_rejected(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        big_chunk = b"x" * (3 * 1024 * 1024)
+        page = _FakeResponse(status_code=200, headers={"Content-Type": "text/html"}, chunks=[big_chunk])
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=page):
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
+        assert rv.status_code == 502
+
+    def test_llm_reports_not_a_recipe(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        page = _FakeResponse(status_code=200, headers={"Content-Type": "text/html"},
+                              chunks=[b"<html>not a recipe</html>"])
+        block = MagicMock(type="text", text=json.dumps({"error": "not_a_recipe"}))
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = MagicMock(content=[block])
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=page), \
+             patch("app.anthropic.Anthropic", return_value=fake_client):
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/page"})
+        assert rv.status_code == 422
+
+    def test_malformed_llm_output_returns_422(self, client, monkeypatch):
+        make_user()
+        do_login(client)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "fake-key")
+        page = _FakeResponse(status_code=200, headers={"Content-Type": "text/html"},
+                              chunks=[b"<html>recipe</html>"])
+        block = MagicMock(type="text", text="not json at all")
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = MagicMock(content=[block])
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", return_value=page), \
+             patch("app.anthropic.Anthropic", return_value=fake_client):
+            rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/page"})
+        assert rv.status_code == 422

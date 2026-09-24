@@ -1,13 +1,20 @@
+import ipaddress
 import json
 import queue
+import re
+import socket
 import sqlite3
 import threading
 import time
 from datetime import timedelta
 from functools import wraps
-from urllib.parse import urlparse
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 
+import anthropic
 import bcrypt
+import requests
+from requests.adapters import HTTPAdapter
 from flask import (
     Flask,
     Response,
@@ -172,6 +179,29 @@ def upgrade_db():
             )
         """)
         db.execute("INSERT OR IGNORE INTO item_name_history (name) SELECT DISTINCT name FROM items")
+
+    # --- Recipes tables ---
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'recipes' not in tables:
+        db.execute("""
+            CREATE TABLE recipes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                notes TEXT,
+                steps TEXT,
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+    if 'recipe_ingredients' not in tables:
+        db.execute("""
+            CREATE TABLE recipe_ingredients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+                text TEXT NOT NULL
+            )
+        """)
 
     # --- Audit log table ---
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -418,6 +448,14 @@ def index():
         return redirect(url_for("register"))
     return render_template("list.html", username=session["username"],
                            is_admin=(session.get("role") == "admin"))
+
+
+@app.route("/recipes")
+@login_required
+def recipes():
+    return render_template("recipes.html", username=session["username"],
+                           is_admin=(session.get("role") == "admin"),
+                           import_url_enabled=bool(config.ANTHROPIC_API_KEY))
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +725,485 @@ def clear_bought():
 
 
 # ---------------------------------------------------------------------------
+# Recipes API
+# ---------------------------------------------------------------------------
+#
+# Recipes and their edits are open to any household member, same as items and
+# lists (see the note above add_item). Deletion is restricted to the recipe's
+# creator or an admin, same as delete_list.
+
+def may_delete_recipe(created_by, is_admin):
+    return is_admin or (created_by is not None and created_by == session.get("user_id"))
+
+
+def _prepare_lines(raw, max_lines, max_len):
+    """Trim a list of freeform text lines, dropping blanks, for storage.
+
+    Returns (cleaned_list, error_message). error_message is None on success.
+    """
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        return None, "Invalid format"
+    if len(raw) > max_lines:
+        return None, f"Too many lines (max {max_lines})"
+    cleaned = []
+    for entry in raw:
+        text = entry.strip() if isinstance(entry, str) else ""
+        if not text:
+            continue
+        if len(text) > max_len:
+            return None, f"Line too long (max {max_len} chars)"
+        cleaned.append(text)
+    return cleaned, None
+
+
+@app.route("/api/recipes")
+@login_required
+def get_recipes():
+    db = get_db()
+    rows = db.execute(
+        "SELECT recipes.*, "
+        "(SELECT COUNT(*) FROM recipe_ingredients WHERE recipe_id = recipes.id) AS ingredient_count "
+        "FROM recipes ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    is_admin = current_user_is_admin()
+    return jsonify([
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "notes": r["notes"],
+            "ingredient_count": r["ingredient_count"],
+            "created_by": r["created_by"],
+            "can_delete": may_delete_recipe(r["created_by"], is_admin),
+        }
+        for r in rows
+    ])
+
+
+@app.route("/api/recipes/<int:recipe_id>")
+@login_required
+def get_recipe(recipe_id):
+    db = get_db()
+    recipe = db.execute(
+        "SELECT recipes.*, users.username AS created_by_name "
+        "FROM recipes LEFT JOIN users ON recipes.created_by = users.id "
+        "WHERE recipes.id = ?",
+        (recipe_id,),
+    ).fetchone()
+    if recipe is None:
+        return jsonify({"error": "Recipe not found"}), 404
+    ingredients = db.execute(
+        "SELECT id, text FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
+        (recipe_id,),
+    ).fetchall()
+    data = dict(recipe)
+    data["ingredients"] = [dict(i) for i in ingredients]
+    data["can_delete"] = may_delete_recipe(recipe["created_by"], current_user_is_admin())
+    return jsonify(data)
+
+
+def _validate_recipe_payload(data):
+    """Shared validation for create/update. Returns (fields_dict, error_response_or_None)."""
+    name = (data.get("name") or "").strip()
+    notes = (data.get("notes") or "").strip() or None
+
+    if not name:
+        return None, (jsonify({"error": "Name is required"}), 400)
+    if len(name) > 200:
+        return None, (jsonify({"error": "Name too long"}), 400)
+    if notes and len(notes) > 2000:
+        return None, (jsonify({"error": "Notes too long"}), 400)
+
+    ingredients, err = _prepare_lines(data.get("ingredients"), max_lines=200, max_len=200)
+    if err:
+        return None, (jsonify({"error": err}), 400)
+    if not ingredients:
+        return None, (jsonify({"error": "At least one ingredient is required"}), 400)
+
+    steps, err = _prepare_lines(data.get("steps"), max_lines=100, max_len=300)
+    if err:
+        return None, (jsonify({"error": err}), 400)
+    steps_text = "\n".join(steps) or None
+    if steps_text and len(steps_text) > 4000:
+        return None, (jsonify({"error": "Steps too long"}), 400)
+
+    return {"name": name, "notes": notes, "steps_text": steps_text, "ingredients": ingredients}, None
+
+
+@app.route("/api/recipes", methods=["POST"])
+@login_required
+def create_recipe():
+    fields, error = _validate_recipe_payload(request.get_json() or {})
+    if error:
+        return error
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO recipes (name, notes, steps, created_by) VALUES (?, ?, ?, ?)",
+        (fields["name"], fields["notes"], fields["steps_text"], session["user_id"]),
+    )
+    recipe_id = cur.lastrowid
+    db.executemany(
+        "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
+        [(recipe_id, text) for text in fields["ingredients"]],
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({"id": recipe_id}), 201
+
+
+@app.route("/api/recipes/<int:recipe_id>", methods=["PUT"])
+@login_required
+def update_recipe(recipe_id):
+    db = get_db()
+    if db.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
+        return jsonify({"error": "Recipe not found"}), 404
+
+    fields, error = _validate_recipe_payload(request.get_json() or {})
+    if error:
+        return error
+
+    db.execute(
+        "UPDATE recipes SET name = ?, notes = ?, steps = ?, updated_at = datetime('now') WHERE id = ?",
+        (fields["name"], fields["notes"], fields["steps_text"], recipe_id),
+    )
+    db.execute("DELETE FROM recipe_ingredients WHERE recipe_id = ?", (recipe_id,))
+    db.executemany(
+        "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
+        [(recipe_id, text) for text in fields["ingredients"]],
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/recipes/<int:recipe_id>", methods=["DELETE"])
+@login_required
+def delete_recipe(recipe_id):
+    db = get_db()
+    recipe = db.execute(
+        "SELECT name, created_by FROM recipes WHERE id = ?", (recipe_id,)
+    ).fetchone()
+    if recipe is None:
+        return jsonify({"error": "Recipe not found"}), 404
+    if not may_delete_recipe(recipe["created_by"], current_user_is_admin()):
+        return jsonify({"error": "Only an admin or the recipe's creator can delete it"}), 403
+    db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
+    log_audit("recipe.delete", f"Deleted recipe '{recipe['name']}'")
+    db.commit()
+    broadcast("update")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/recipes/<int:recipe_id>/add-to-list", methods=["POST"])
+@login_required
+def add_recipe_to_list(recipe_id):
+    """Atomically add selected recipe ingredients to a grocery list."""
+    data = request.get_json() or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid format"}), 400
+
+    list_id = data.get("list_id")
+    section = data.get("section", "now")
+    ingredient_ids = data.get("ingredient_ids")
+    if type(list_id) is not int:
+        return jsonify({"error": "List is required"}), 400
+    if section not in ("now", "later"):
+        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+    if (not isinstance(ingredient_ids, list) or not ingredient_ids or len(ingredient_ids) > 200
+            or any(type(value) is not int for value in ingredient_ids)
+            or len(set(ingredient_ids)) != len(ingredient_ids)):
+        return jsonify({"error": "Select at least one valid ingredient"}), 400
+
+    db = get_db()
+    if db.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
+        return jsonify({"error": "Recipe not found"}), 404
+    if db.execute("SELECT id FROM lists WHERE id = ?", (list_id,)).fetchone() is None:
+        return jsonify({"error": "List not found"}), 404
+
+    placeholders = ",".join("?" for _ in ingredient_ids)
+    ingredients = db.execute(
+        f"SELECT id, text FROM recipe_ingredients "
+        f"WHERE recipe_id = ? AND id IN ({placeholders})",
+        (recipe_id, *ingredient_ids),
+    ).fetchall()
+    if len(ingredients) != len(ingredient_ids):
+        return jsonify({"error": "Invalid ingredient selection"}), 400
+
+    text_by_id = {row["id"]: row["text"] for row in ingredients}
+    texts = [text_by_id[ingredient_id] for ingredient_id in ingredient_ids]
+    with db:
+        db.executemany(
+            "INSERT INTO items (name, section, list_id, added_by) VALUES (?, ?, ?, ?)",
+            [(text, section, list_id, session["user_id"]) for text in texts],
+        )
+        db.executemany(
+            "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
+            "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
+            [(text,) for text in texts],
+        )
+    broadcast("update")
+    return jsonify({"added": len(texts)}), 201
+
+
+# --- Recipe URL import (fetch a page, ask an LLM to extract the recipe) ---
+#
+# This endpoint never writes to the database -- it only returns extracted
+# fields for the client to drop into the create/edit form for review. The
+# fetched page is user-supplied and untrusted, so outbound requests are
+# restricted to public hosts (see _resolve_safe_ip) to prevent SSRF against
+# the server's own network. Every hop resolves the hostname exactly once and
+# pins the connection to that specific address (see _PinnedHostAdapter)
+# rather than validating a hostname and then letting the HTTP client re-
+# resolve and connect separately -- that gap is a DNS-rebinding attack (the
+# attacker's DNS returns a public IP for the check and a private one, with a
+# very short TTL, for the connection moments later). The LLM's output is
+# likewise untrusted text: it is only ever displayed back as editable form
+# fields, and is subject to the same length limits as a normal recipe save.
+
+_RECIPE_IMPORT_MAX_REDIRECTS = 3
+_RECIPE_IMPORT_MAX_BYTES = 2 * 1024 * 1024
+_RECIPE_IMPORT_TIMEOUT = 10
+_RECIPE_IMPORT_TEXT_LIMIT = 15000
+
+_RECIPE_EXTRACTION_PROMPT = (
+    "You extract recipes from webpage text. Given the page text below, respond with ONLY "
+    "a JSON object (no markdown fences, no commentary) shaped like "
+    '{"name": "...", "notes": "...", "ingredients": ["...", ...], "steps": ["...", ...]}. '
+    "\"notes\" may be an empty string; it should hold any brief context about the dish, not "
+    "the ingredients or steps. If the page text below does not contain a recipe, respond "
+    'with exactly {"error": "not_a_recipe"} and nothing else.\n\nPage text:\n'
+)
+
+
+def _parse_recipe_url(url):
+    """Validate URL shape (scheme/hostname/port). Returns the parsed URL, or None."""
+    try:
+        parts = urlparse(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https"):
+        return None
+    if not parts.hostname:
+        return None
+    if port not in (None, 80, 443):
+        return None
+    return parts
+
+
+def _resolve_safe_ip(hostname):
+    """Resolve `hostname` to the single IP its connection should be pinned to,
+    or None if it's unresolvable or unsafe (private/loopback/link-local/etc).
+
+    Only the one address returned needs checking here: because the caller
+    pins the actual connection to exactly this address (see
+    _PinnedHostAdapter) rather than letting the HTTP client re-resolve later,
+    there's no other address the request could end up reaching.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return None
+    if not infos:
+        return None
+    ip = infos[0][4][0]
+    addr = ipaddress.ip_address(ip)
+    # is_global also rejects shared address space such as 100.64.0.0/10,
+    # which may expose carrier-grade NAT or overlay-network services.
+    if not addr.is_global or addr.is_multicast or addr.is_reserved:
+        return None
+    return ip
+
+
+def _is_safe_url(url):
+    """Cheap up-front check used to fail fast on an obviously bad URL."""
+    parts = _parse_recipe_url(url)
+    return parts is not None and _resolve_safe_ip(parts.hostname) is not None
+
+
+class _PinnedHostAdapter(HTTPAdapter):
+    """A requests HTTPAdapter that connects to a pre-validated IP address
+    instead of letting urllib3 perform its own, separate DNS lookup -- this
+    is what actually closes the DNS-rebinding gap: _resolve_safe_ip's check
+    and the connection use the same resolved address.
+
+    TLS verification (SNI + certificate hostname check) still uses the real
+    hostname via server_hostname/assert_hostname, so HTTPS sites verify
+    normally against the pinned IP.
+
+    Built fresh per request rather than mutating shared/global state (no
+    monkeypatching socket.getaddrinfo or similar), so it's safe to use under
+    this app's gevent concurrency model (a single worker running many
+    cooperatively-scheduled greenlets -- see docker-compose.yml).
+    """
+
+    def __init__(self, pinned_ip, hostname):
+        self._pinned_ip = pinned_ip
+        self._hostname = hostname
+        super().__init__()
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        host_params["host"] = self._pinned_ip
+        pool_kwargs["assert_hostname"] = self._hostname
+        pool_kwargs["server_hostname"] = self._hostname
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+
+class _PageTextExtractor(HTMLParser):
+    """Collects visible text from an HTML document, skipping script/style."""
+
+    _SKIPPED_TAGS = ("script", "style", "noscript")
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self.chunks = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIPPED_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIPPED_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if self._skip_depth:
+            return
+        text = data.strip()
+        if text:
+            self.chunks.append(text)
+
+
+def _fetch_recipe_page(url):
+    """Fetch `url`, following redirects manually so every hop is re-resolved,
+    re-validated, and pinned to the specific address that was checked."""
+    for _ in range(_RECIPE_IMPORT_MAX_REDIRECTS + 1):
+        parts = _parse_recipe_url(url)
+        if parts is None:
+            raise ValueError("blocked_url")
+        safe_ip = _resolve_safe_ip(parts.hostname)
+        if safe_ip is None:
+            raise ValueError("blocked_url")
+
+        session = requests.Session()
+        adapter = _PinnedHostAdapter(safe_ip, parts.hostname)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        try:
+            resp = session.get(
+                url,
+                timeout=_RECIPE_IMPORT_TIMEOUT,
+                stream=True,
+                allow_redirects=False,
+                # The connection is pinned to safe_ip (see _PinnedHostAdapter), which
+                # would otherwise become the default Host header -- send the real
+                # hostname explicitly so name-based virtual hosting still works.
+                headers={"User-Agent": "GroceryListRecipeImport/1.0", "Host": parts.hostname},
+            )
+            try:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise ValueError("bad_redirect")
+                    url = urljoin(url, location)
+                    continue
+                if resp.status_code != 200:
+                    raise ValueError("fetch_failed")
+                if "text/html" not in resp.headers.get("Content-Type", ""):
+                    raise ValueError("not_html")
+                chunks = []
+                total = 0
+                for chunk in resp.iter_content(chunk_size=8192):
+                    total += len(chunk)
+                    if total > _RECIPE_IMPORT_MAX_BYTES:
+                        raise ValueError("too_large")
+                    chunks.append(chunk)
+                return b"".join(chunks).decode(resp.encoding or "utf-8", errors="ignore")
+            finally:
+                resp.close()
+        finally:
+            session.close()
+    raise ValueError("too_many_redirects")
+
+
+def _html_to_text(page_html):
+    parser = _PageTextExtractor()
+    parser.feed(page_html)
+    return "\n".join(parser.chunks)[:_RECIPE_IMPORT_TEXT_LIMIT]
+
+
+def _extract_recipe_with_llm(page_text):
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": _RECIPE_EXTRACTION_PROMPT + page_text}],
+    )
+    raw = "".join(block.text for block in response.content if block.type == "text").strip()
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("bad_llm_output")
+    if not isinstance(data, dict):
+        raise ValueError("bad_llm_output")
+    if data.get("error") == "not_a_recipe":
+        raise ValueError("not_a_recipe")
+    return data
+
+
+@app.route("/api/recipes/extract-url", methods=["POST"])
+@login_required
+@limiter.limit("10 per hour")
+def extract_recipe_url():
+    if not config.ANTHROPIC_API_KEY:
+        return jsonify({"error": "Recipe URL import is not configured on this server"}), 501
+
+    data = request.get_json() or {}
+    url = (data.get("url") or "").strip()
+    if not url or len(url) > 2000 or not _is_safe_url(url):
+        return jsonify({"error": "Enter a valid, public recipe URL"}), 400
+
+    try:
+        page_html = _fetch_recipe_page(url)
+    except ValueError:
+        return jsonify({"error": "Could not fetch that page"}), 502
+    except requests.RequestException:
+        return jsonify({"error": "Could not fetch that page"}), 502
+
+    page_text = _html_to_text(page_html)
+    if not page_text.strip():
+        return jsonify({"error": "Could not find a recipe on that page"}), 422
+
+    try:
+        extracted = _extract_recipe_with_llm(page_text)
+    except ValueError as e:
+        if str(e) == "not_a_recipe":
+            return jsonify({"error": "Could not find a recipe on that page"}), 422
+        return jsonify({"error": "Could not read the extracted recipe"}), 422
+    except anthropic.AnthropicError:
+        return jsonify({"error": "Recipe extraction failed"}), 502
+
+    name = str(extracted.get("name") or "")[:200]
+    notes = str(extracted.get("notes") or "")[:2000]
+    raw_ingredients = extracted.get("ingredients")
+    raw_steps = extracted.get("steps")
+    ingredients = [str(i)[:200] for i in raw_ingredients if str(i).strip()][:200] \
+        if isinstance(raw_ingredients, list) else []
+    steps = [str(s)[:300] for s in raw_steps if str(s).strip()][:100] \
+        if isinstance(raw_steps, list) else []
+
+    if not name or not ingredients:
+        return jsonify({"error": "Could not find a recipe on that page"}), 422
+
+    return jsonify({"name": name, "notes": notes, "ingredients": ingredients, "steps": steps})
+
+
+# ---------------------------------------------------------------------------
 # Change password (forced after admin creates/resets)
 # ---------------------------------------------------------------------------
 
@@ -870,6 +1387,9 @@ def admin_delete_user(user_id):
     target = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
     db.execute("UPDATE items SET added_by = NULL WHERE added_by = ?", (user_id,))
     db.execute("UPDATE lists SET created_by = NULL WHERE created_by = ?", (user_id,))
+    # Upgraded databases retain the original recipes table definition, so
+    # clear ownership explicitly as well as using ON DELETE SET NULL on new DBs.
+    db.execute("UPDATE recipes SET created_by = NULL WHERE created_by = ?", (user_id,))
     db.execute("UPDATE audit_log SET actor_id = NULL WHERE actor_id = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     if target:

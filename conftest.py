@@ -50,7 +50,10 @@ def _clean_db(app):
     """Wipe every table before each test for full isolation."""
     with app.app_context():
         db = get_db()
-        for table in ("audit_log", "item_name_history", "items", "lists", "users"):
+        for table in (
+            "audit_log", "item_name_history", "recipe_ingredients", "recipes",
+            "items", "lists", "users",
+        ):
             db.execute(f"DELETE FROM {table}")  # noqa: S608
         db.commit()
 
@@ -105,6 +108,23 @@ def make_item(list_id, name="Milk", section="now", is_bought=0, added_by=None):
         )
         db.commit()
         return cur.lastrowid
+
+
+def make_recipe(name="Pancakes", notes=None, steps=None, ingredients=("Flour", "Eggs"), created_by=None):
+    with _flask_app.app_context():
+        db = get_db()
+        steps_text = "\n".join(steps) if steps else None
+        cur = db.execute(
+            "INSERT INTO recipes (name, notes, steps, created_by) VALUES (?, ?, ?, ?)",
+            (name, notes, steps_text, created_by),
+        )
+        recipe_id = cur.lastrowid
+        db.executemany(
+            "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
+            [(recipe_id, text) for text in ingredients],
+        )
+        db.commit()
+        return recipe_id
 
 
 def do_login(client, username="alice", password="pass1234"):
