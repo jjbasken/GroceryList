@@ -95,6 +95,13 @@ class TestRegister:
         assert rv.status_code == 403
         assert db_count(app, "SELECT COUNT(*) FROM users") == 0
 
+    def test_non_ascii_bootstrap_token_rejected(self, client, app):
+        rv = client.post("/register", data={
+            "setup_token": "tökén", "username": "alice", "password": "pass1234",
+        })
+        assert rv.status_code == 403
+        assert db_count(app, "SELECT COUNT(*) FROM users") == 0
+
     def test_setup_locked_without_bootstrap_token(self, client, monkeypatch):
         monkeypatch.setattr("config.BOOTSTRAP_TOKEN", "")
         rv = client.get("/register")

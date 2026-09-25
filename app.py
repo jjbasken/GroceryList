@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import hmac
 import json
@@ -359,7 +360,8 @@ def register():
     password = request.form.get("password", "").strip()
     setup_token = request.form.get("setup_token", "")
 
-    if not hmac.compare_digest(setup_token, config.BOOTSTRAP_TOKEN):
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    if not hmac.compare_digest(setup_token.encode(), config.BOOTSTRAP_TOKEN.encode()):
         flash("Invalid setup token.")
         return render_template("register.html", bootstrap_enabled=True), 403
 
@@ -918,23 +920,19 @@ def admin_delete_user(user_id):
 # PWA manifest
 # ---------------------------------------------------------------------------
 
-PWA_ASSETS = (
-    "app.js",
-    "offline-security.js",
-    "style.css",
-    "icon-192.png",
-    "icon-512.png",
-    "manifest.webmanifest",
-)
-
-
+@functools.cache
 def pwa_asset_version():
+    # Every file under /static/ is cached cache-first by the service worker, so
+    # all of them (except the worker itself) must feed the cache key.
     digest = hashlib.sha256()
     static_root = Path(app.static_folder)
-    for filename in PWA_ASSETS:
-        digest.update(filename.encode())
-        digest.update((static_root / filename).read_bytes())
+    for path in sorted(p for p in static_root.rglob("*") if p.is_file()):
+        if path.name == "sw.js":
+            continue
+        digest.update(path.relative_to(static_root).as_posix().encode())
+        digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
+
 
 @app.route("/manifest.webmanifest")
 def manifest():

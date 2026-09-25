@@ -10,7 +10,8 @@ RUN groupadd --system --gid 10001 grocery \
     && mkdir -p /data \
     && chown grocery:grocery /data
 
-COPY --chown=grocery:grocery . .
+# Application code stays root-owned so the runtime user cannot modify it.
+COPY . .
 
 EXPOSE 5000
 
