@@ -2,8 +2,8 @@ FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc4243
 
 WORKDIR /app
 
-COPY requirements.lock .
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY requirements.txt .
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 RUN groupadd --system --gid 10001 grocery \
     && useradd --system --uid 10001 --gid grocery --home-dir /app grocery \
