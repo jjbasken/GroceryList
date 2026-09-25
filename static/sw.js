@@ -1,6 +1,8 @@
 importScripts('/static/offline-security.js');
 
-const SHELL_CACHE = 'grocery-static-v8';
+// Flask replaces this token with a digest of every app-shell asset. Any asset
+// change therefore changes the service-worker script and its cache name.
+const SHELL_CACHE = 'grocery-static-__ASSET_VERSION__';
 const SESSION_CACHE = 'grocery-session-v2';
 const ACCOUNT_MARKER = '/__offline_account__';
 const APP_SHELL = [
@@ -43,8 +45,12 @@ self.addEventListener('install', event => {
 });
 self.addEventListener('activate', event => {
     // Legacy caches and unbound operations cannot be assigned to an account.
-    event.waitUntil(withStorage(() => GroceryOffline.clearPrivateData())
-        .then(() => self.clients.claim()));
+    event.waitUntil(Promise.all([
+        withStorage(() => GroceryOffline.clearPrivateData()),
+        caches.keys().then(keys => Promise.all(keys
+            .filter(key => key.startsWith('grocery-static-') && key !== SHELL_CACHE)
+            .map(key => caches.delete(key)))),
+    ]).then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', event => {

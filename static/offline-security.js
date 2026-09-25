@@ -5,7 +5,10 @@
     async function clearPrivateData() {
         await Promise.all([
             caches.keys().then(keys => Promise.all(keys
-                .filter(key => key.startsWith('grocery-') && key !== 'grocery-static-v8')
+                // App-shell assets contain no account data and remain available
+                // offline. The service worker removes superseded shell versions
+                // during activation.
+                .filter(key => key.startsWith('grocery-') && !key.startsWith('grocery-static-'))
                 .map(key => caches.delete(key)))),
             new Promise((resolve, reject) => {
                 const request = indexedDB.open('grocery-offline', 1);

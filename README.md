@@ -36,27 +36,48 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 
    ```
    SECRET_KEY=your-random-secret-key-here
+   # Required only until the initial administrator has been created
+   BOOTSTRAP_TOKEN=your-random-one-time-setup-token
    # Optional — defaults to /data/grocery.db inside the container
    DATABASE=/data/grocery.db
    # Optional — only needed if using the Cloudflare tunnel service
    CLOUDFLARE_TUNNEL_TOKEN=your-token-here
+   # Linux bind-mount ownership (use `id -u` and `id -g`)
+   APP_UID=1000
+   APP_GID=1000
    ```
+
+   Generate both secrets independently, for example with
+   `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 2. Start the app:
 
    ```bash
+   mkdir -p data
    docker compose up -d
    ```
 
-3. Open `http://localhost:5000` in your browser. The first user to register becomes the initial user; promote them to admin via the admin panel or directly in the database.
+   If an existing `data/` directory was created by a root-running version of
+   the container, change its ownership to the `APP_UID`/`APP_GID` configured
+   above before starting the hardened non-root image.
+
+3. Open the HTTPS hostname configured for your Cloudflare tunnel. Enter the
+   one-time setup token to create the initial administrator, then remove
+   `BOOTSTRAP_TOKEN` from `.env` and restart the services.
+
+The production Compose configuration trusts one reverse-proxy hop and redirects
+HTTP requests to HTTPS. For loopback-only development without the tunnel, set
+`ENFORCE_HTTPS=false` and `TRUST_PROXY_HEADERS=false` in `.env`, then use
+`http://localhost:5000`.
 
 Data is persisted in the `./data/` directory on the host.
 
 ### Run Locally (no Docker)
 
 ```bash
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 export SECRET_KEY=your-secret-key
+export BOOTSTRAP_TOKEN=your-one-time-setup-token
 export DATABASE=grocery.db
 python -c "import app; app.init_db(); app.upgrade_db()"
 flask run
@@ -69,11 +90,19 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes | — | Flask session signing key |
+| `BOOTSTRAP_TOKEN` | Initial setup | — | One-time token required to create the first administrator |
 | `DATABASE` | No | `/data/grocery.db` | Path to the SQLite database file |
+| `ENFORCE_HTTPS` | No | `false` | Redirect HTTP to HTTPS; Compose defaults this to `true` |
+| `TRUST_PROXY_HEADERS` | No | `false` | Trust proxy client/scheme headers; enable only behind the configured tunnel |
+| `TRUSTED_PROXY_HOPS` | No | `1` | Number of trusted proxy hops |
 
 ## Cloudflare Tunnel
 
-The `docker-compose.yml` includes an optional `tunnel` service that exposes the app via a Cloudflare Tunnel. Set `CLOUDFLARE_TUNNEL_TOKEN` in your `.env` to enable it. Remove or comment out the `tunnel` service block if you don't need it.
+The `docker-compose.yml` includes an optional `tunnel` service that exposes the
+app via a Cloudflare Tunnel. Set `CLOUDFLARE_TUNNEL_TOKEN` in your `.env` to
+enable it. Remove or comment out the tunnel service and disable the two proxy/TLS
+settings for loopback-only HTTP development. The application emits HSTS on
+HTTPS responses; Cloudflare should also have **Always Use HTTPS** enabled.
 
 ## Admin Panel
 
@@ -99,6 +128,14 @@ response header on `/api/csrf-token`.
 
 Run backend regressions with `python -m pytest -q` and browser-script regressions
 with `node tests/offline-security.test.js` (Node.js 22 or newer).
+
+Dependencies used by production and CI are fully resolved in hash-locked files.
+After intentionally changing `requirements.txt` or `requirements-dev.txt`,
+regenerate the corresponding `.lock` file with
+`pip-compile --generate-hashes --allow-unsafe`. GitHub Actions runs tests,
+dependency auditing, Bandit, a full-history secret scan, and a production
+container build. Dependabot checks Python, Docker, and GitHub Actions inputs
+weekly.
 
 ## Project Structure
 
