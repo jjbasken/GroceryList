@@ -1310,3 +1310,31 @@ class TestPWAEndpoints:
         rv = client.get("/manifest.webmanifest")
         assert rv.status_code == 200
         assert "manifest" in rv.headers.get("Content-Type", "")
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+
+class TestHealthz:
+    def test_healthy_before_initial_setup(self, client, monkeypatch):
+        # Fresh install: no users and setup locked must not fail the health check.
+        monkeypatch.setattr("config.BOOTSTRAP_TOKEN", "")
+        rv = client.get("/healthz")
+        assert rv.status_code == 200
+        assert rv.data == b"ok\n"
+
+    def test_not_redirected_when_https_enforced(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENFORCE_HTTPS", True)
+        assert client.get("/healthz").status_code == 200
+
+    def test_other_routes_still_redirected(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENFORCE_HTTPS", True)
+        assert client.get("/healthz/extra").status_code == 308
+
+    def test_database_failure_reports_unavailable(self, client, monkeypatch, tmp_path):
+        monkeypatch.setattr("config.DATABASE", str(tmp_path / "missing" / "grocery.db"))
+        rv = client.get("/healthz")
+        assert rv.status_code == 503
+        assert b"missing" not in rv.data

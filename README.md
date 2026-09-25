@@ -104,6 +104,10 @@ enable it. Remove or comment out the tunnel service and disable the two proxy/TL
 settings for loopback-only HTTP development. The application emits HSTS on
 HTTPS responses; Cloudflare should also have **Always Use HTTPS** enabled.
 
+The container health check calls `/healthz`, which reports whether the app can
+reach its database. It needs no login, works before initial setup, and is exempt
+from the HTTPS redirect so it can be called over loopback HTTP.
+
 ## Admin Panel
 
 Navigate to `/admin` (admin users only) to:

@@ -19,7 +19,7 @@ services:
       - 127.0.0.1:5000:5000
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.Request('http://localhost:5000/login', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/healthz')"]
       interval: 10s
       timeout: 5s
       retries: 3

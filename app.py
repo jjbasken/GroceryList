@@ -66,6 +66,9 @@ subscribers_lock = threading.Lock()
 
 @app.before_request
 def require_https():
+    # The container health check calls /healthz directly over loopback HTTP.
+    if request.path == "/healthz":
+        return None
     if config.ENFORCE_HTTPS and not request.is_secure:
         return redirect(request.url.replace("http://", "https://", 1), code=308)
 
@@ -975,6 +978,23 @@ def stream():
 
     return Response(event_stream(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.route("/healthz")
+@limiter.exempt
+def healthz():
+    # Liveness for the container health check. Independent of setup state and
+    # authentication, so a fresh install without users still reports healthy.
+    try:
+        get_db().execute("SELECT 1 FROM users LIMIT 1").fetchall()
+    except sqlite3.Error:
+        app.logger.exception("Health check database query failed")
+        return Response("unavailable\n", status=503, mimetype="text/plain")
+    return Response("ok\n", mimetype="text/plain", headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
