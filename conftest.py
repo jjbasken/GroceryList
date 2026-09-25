@@ -8,6 +8,8 @@ import os
 import tempfile
 
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
+os.environ.setdefault("BOOTSTRAP_TOKEN", "test-bootstrap-token")
+os.environ.setdefault("TRUST_PROXY_HEADERS", "true")
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
 os.environ["DATABASE"] = _tmp.name

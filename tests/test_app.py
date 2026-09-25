@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from app import app as flask_app, get_db, upgrade_db
+from app import app as flask_app, get_db, pwa_asset_version, upgrade_db
 from conftest import do_login, make_item, make_list, make_user
 
 
@@ -56,37 +56,57 @@ class TestRegister:
         assert "/login" in rv.location
 
     def test_first_user_becomes_admin(self, client, app):
-        rv = client.post("/register", data={"username": "alice", "password": "pass1234"})
+        rv = client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "alice", "password": "pass1234"})
         assert rv.status_code == 302
         row = db_query(app, "SELECT role FROM users WHERE username = 'alice'")
         assert row["role"] == "admin"
 
     def test_register_creates_session(self, client):
-        client.post("/register", data={"username": "alice", "password": "pass1234"})
+        client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "alice", "password": "pass1234"})
         rv = client.get("/")
         assert rv.status_code == 200  # logged in, not redirected
 
     def test_empty_fields_rejected(self, client):
-        rv = client.post("/register", data={"username": "", "password": ""})
+        rv = client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "", "password": ""})
         assert rv.status_code == 400
 
     def test_short_password_rejected(self, client):
-        rv = client.post("/register", data={"username": "alice", "password": "ab"})
+        rv = client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "alice", "password": "ab"})
         assert rv.status_code == 400
 
     def test_claims_ownerless_lists_for_initial_admin(self, client, app):
         lid = make_list("Groceries")  # seeded before any user exists
-        client.post("/register", data={"username": "alice", "password": "pass1234"})
+        client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "alice", "password": "pass1234"})
         uid = db_query(app, "SELECT id FROM users WHERE username = 'alice'")["id"]
         assert db_query(app, "SELECT created_by FROM lists WHERE id = ?", (lid,))[0] == uid
 
     def test_initial_admin_can_delete_claimed_seed_list(self, client):
         lid = make_list("Groceries")
         make_list("Second")
-        client.post("/register", data={"username": "alice", "password": "pass1234"})
+        client.post("/register", data={"setup_token": "test-bootstrap-token", "username": "alice", "password": "pass1234"})
         with client.session_transaction() as session:
             account = session["account_id"]
         assert client.delete(f"/api/lists/{lid}", headers={"X-Account-ID": account}).status_code == 200
+
+    def test_invalid_bootstrap_token_rejected(self, client, app):
+        rv = client.post("/register", data={
+            "setup_token": "wrong", "username": "alice", "password": "pass1234",
+        })
+        assert rv.status_code == 403
+        assert db_count(app, "SELECT COUNT(*) FROM users") == 0
+
+    def test_non_ascii_bootstrap_token_rejected(self, client, app):
+        rv = client.post("/register", data={
+            "setup_token": "tökén", "username": "alice", "password": "pass1234",
+        })
+        assert rv.status_code == 403
+        assert db_count(app, "SELECT COUNT(*) FROM users") == 0
+
+    def test_setup_locked_without_bootstrap_token(self, client, monkeypatch):
+        monkeypatch.setattr("config.BOOTSTRAP_TOKEN", "")
+        rv = client.get("/register")
+        assert rv.status_code == 503
+        assert b"Initial setup is locked" in rv.data
 
 
 # ---------------------------------------------------------------------------
@@ -1127,6 +1147,35 @@ class TestPasswordChangeRevokesSessions:
 
 
 class TestSecurityHeaders:
+    def test_http_redirects_to_https_when_enforced(self, client, monkeypatch):
+        make_user()
+        monkeypatch.setattr("config.ENFORCE_HTTPS", True)
+        rv = client.get("/login")
+        assert rv.status_code == 308
+        assert rv.location == "https://localhost/login"
+
+    def test_trusted_https_proxy_sets_hsts(self, client, monkeypatch):
+        make_user()
+        monkeypatch.setattr("config.ENFORCE_HTTPS", True)
+        rv = client.get("/login", headers={"X-Forwarded-Proto": "https"})
+        assert rv.status_code == 200
+        assert rv.headers["Strict-Transport-Security"] == "max-age=31536000"
+
+    def test_trusted_proxy_supplies_rate_limit_client_address(self, client):
+        seen = []
+
+        def capture_remote_address():
+            from flask import request
+            seen.append(request.remote_addr)
+
+        flask_app.before_request_funcs.setdefault(None, []).append(capture_remote_address)
+        try:
+            client.get("/register", headers={"X-Forwarded-For": "203.0.113.42"})
+        finally:
+            flask_app.before_request_funcs[None].remove(capture_remote_address)
+
+        assert seen == ["203.0.113.42"]
+
     def test_x_frame_options_deny(self, client):
         make_user()
         do_login(client)
@@ -1253,6 +1302,9 @@ class TestPWAEndpoints:
         rv = client.get("/sw.js")
         assert rv.status_code == 200
         assert "no-cache" in rv.headers.get("Cache-Control", "")
+        assert "__ASSET_VERSION__" not in rv.get_data(as_text=True)
+        assert f"grocery-static-{pwa_asset_version()}" in rv.get_data(as_text=True)
+        assert rv.headers["Service-Worker-Allowed"] == "/"
 
     def test_manifest_served_with_correct_content_type(self, client):
         rv = client.get("/manifest.webmanifest")

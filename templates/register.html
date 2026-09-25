@@ -8,12 +8,17 @@
     <div class="flash">{{ messages[0] }}</div>
     {% endif %}
     {% endwith %}
+    {% if bootstrap_enabled %}
     <form method="POST" action="{{ url_for('register') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="password" name="setup_token" placeholder="One-time setup token" autocomplete="off" required>
         <input type="text" name="username" placeholder="Username" autocomplete="username" required autofocus>
         <input type="password" name="password" placeholder="Password" autocomplete="new-password" required>
         <button type="submit">Create account</button>
     </form>
+    {% else %}
+    <p class="flash">Initial setup is locked. Set a BOOTSTRAP_TOKEN on the server, restart the app, and reload this page.</p>
+    {% endif %}
     <p class="auth-link"><a href="{{ url_for('login') }}">Already have an account? Log in</a></p>
 </div>
 {% endblock %}

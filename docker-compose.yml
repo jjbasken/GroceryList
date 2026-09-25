@@ -1,11 +1,16 @@
 services:
   web:
     build: .
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
       - ./data:/data
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
       - DATABASE=/data/grocery.db
+      - ENFORCE_HTTPS=${ENFORCE_HTTPS:-true}
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
+      - TRUSTED_PROXY_HOPS=1
     ports:
       # Loopback only: public traffic must come through the Cloudflare tunnel,
       # which reaches web:5000 over grocery-net. Binding 0.0.0.0 would expose
@@ -14,7 +19,7 @@ services:
       - 127.0.0.1:5000:5000
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/login')"]
+      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.Request('http://localhost:5000/login', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r)"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -23,7 +28,7 @@ services:
       - grocery-net
 
   tunnel:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       web:

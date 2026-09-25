@@ -134,9 +134,10 @@ test('activation purges legacy caches and unbound operations', async () => {
     const w = worker([{ method: 'DELETE', url: '/api/items/1' }]);
     await w.caches.open('grocery-v7');
     await w.caches.open('grocery-data-v1');
-    await w.caches.open('grocery-static-v8');
+    await w.caches.open('grocery-static-old');
+    await w.caches.open('grocery-static-__ASSET_VERSION__');
     await w.activate();
-    assert.deepEqual(await w.caches.keys(), ['grocery-static-v8']);
+    assert.deepEqual(await w.caches.keys(), ['grocery-static-__ASSET_VERSION__']);
     assert.equal(w.indexedDB.rows.size, 0);
 });
 

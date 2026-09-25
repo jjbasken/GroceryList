@@ -1,3 +1,6 @@
+import functools
+import hashlib
+import hmac
 import json
 import queue
 import sqlite3
@@ -5,6 +8,7 @@ import threading
 import time
 from datetime import timedelta
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlparse
 
 import bcrypt
@@ -23,11 +27,21 @@ from flask import (
 from flask_wtf.csrf import CSRFError, CSRFProtect, generate_csrf
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 import config
 
 app = Flask(__name__)
 app.config.from_object(config)  # SECRET_KEY, WTF_CSRF_TIME_LIMIT
+if config.TRUST_PROXY_HEADERS:
+    # The Compose deployment accepts traffic only from one trusted reverse proxy
+    # hop (cloudflared). Do not enable this when clients can reach Gunicorn
+    # directly, because forwarding headers are otherwise spoofable.
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=config.TRUSTED_PROXY_HOPS,
+        x_proto=config.TRUSTED_PROXY_HOPS,
+    )
 app.permanent_session_lifetime = timedelta(days=36500)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -48,6 +62,12 @@ limiter = Limiter(
 # SSE subscribers: list of queue.Queue objects
 subscribers = []
 subscribers_lock = threading.Lock()
+
+
+@app.before_request
+def require_https():
+    if config.ENFORCE_HTTPS and not request.is_secure:
+        return redirect(request.url.replace("http://", "https://", 1), code=308)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +95,8 @@ def set_security_headers(response):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data:; connect-src 'self'"
@@ -327,21 +349,37 @@ def register():
     if has_users():
         return redirect(url_for("login"))
 
+    bootstrap_enabled = bool(config.BOOTSTRAP_TOKEN)
+    if not bootstrap_enabled:
+        return render_template("register.html", bootstrap_enabled=False), 503
+
     if request.method == "GET":
-        return render_template("register.html")
+        return render_template("register.html", bootstrap_enabled=True)
 
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "").strip()
+    setup_token = request.form.get("setup_token", "")
+
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    if not hmac.compare_digest(setup_token.encode(), config.BOOTSTRAP_TOKEN.encode()):
+        flash("Invalid setup token.")
+        return render_template("register.html", bootstrap_enabled=True), 403
 
     if not username or not password:
         flash("Username and password are required.")
-        return render_template("register.html"), 400
+        return render_template("register.html", bootstrap_enabled=True), 400
     if len(password) < 5:
         flash("Password must be at least 5 characters.")
-        return render_template("register.html"), 400
+        return render_template("register.html", bootstrap_enabled=True), 400
 
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     db = get_db()
+    # Serialize setup and re-check inside the write transaction. This prevents
+    # two simultaneous first-run requests from both creating administrators.
+    db.execute("BEGIN IMMEDIATE")
+    if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] != 0:
+        db.rollback()
+        return redirect(url_for("login"))
     db.execute(
         "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, pw_hash),
@@ -882,6 +920,20 @@ def admin_delete_user(user_id):
 # PWA manifest
 # ---------------------------------------------------------------------------
 
+@functools.cache
+def pwa_asset_version():
+    # Every file under /static/ is cached cache-first by the service worker, so
+    # all of them (except the worker itself) must feed the cache key.
+    digest = hashlib.sha256()
+    static_root = Path(app.static_folder)
+    for path in sorted(p for p in static_root.rglob("*") if p.is_file()):
+        if path.name == "sw.js":
+            continue
+        digest.update(path.relative_to(static_root).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 @app.route("/manifest.webmanifest")
 def manifest():
     return app.send_static_file("manifest.webmanifest"), 200, {"Content-Type": "application/manifest+json"}
@@ -889,8 +941,11 @@ def manifest():
 
 @app.route("/sw.js")
 def service_worker():
-    response = app.send_static_file("sw.js")
+    source = (Path(app.static_folder) / "sw.js").read_text()
+    source = source.replace("__ASSET_VERSION__", pwa_asset_version())
+    response = Response(source, mimetype="application/javascript")
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
     return response
 
 
@@ -932,4 +987,4 @@ with app.app_context():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    app.run(host="127.0.0.1", port=5000, threaded=True)
