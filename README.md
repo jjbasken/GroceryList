@@ -18,7 +18,7 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.12, Flask 3, gunicorn + gevent |
+| Backend | Python 3.14, Flask 3, gunicorn + gevent |
 | Database | SQLite (WAL mode) |
 | Frontend | Vanilla JS, CSS, PWA service worker |
 | Container | Docker + Docker Compose |
