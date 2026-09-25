@@ -146,6 +146,19 @@ class TestLogin:
         rv = do_login(client)
         assert rv.status_code == 401
 
+    def test_long_password_matches_legacy_truncated_hash(self, client):
+        # bcrypt<5 silently hashed only the first 72 bytes; those hashes must
+        # keep verifying now that bcrypt>=5 rejects over-long input.
+        long_password = "p" * 100
+        make_user(password=long_password[:72])
+        rv = do_login(client, password=long_password)
+        assert rv.status_code == 302
+
+    def test_long_password_for_unknown_user_returns_401(self, client):
+        make_user()
+        rv = do_login(client, username="nobody", password="p" * 100)
+        assert rv.status_code == 401
+
     def test_must_change_password_redirects_to_change_password(self, client):
         make_user(must_change=1)
         rv = do_login(client)
@@ -237,6 +250,19 @@ class TestChangePassword:
         )
         client.post("/logout")
         rv = do_login(client, username="alice", password="newpass99")
+        assert rv.status_code == 302
+
+    def test_password_longer_than_72_bytes_can_be_set_and_used(self, client):
+        make_user()
+        do_login(client)
+        long_password = "n" * 100
+        rv = client.post(
+            "/change-password",
+            data={"current": "pass1234", "password": long_password, "confirm": long_password},
+        )
+        assert rv.status_code == 302
+        client.post("/logout")
+        rv = do_login(client, username="alice", password=long_password)
         assert rv.status_code == 302
 
     def test_wrong_current_password_rejected(self, client):

@@ -77,6 +77,19 @@ def require_https():
 # Database helpers
 # ---------------------------------------------------------------------------
 
+# bcrypt only uses the first 72 bytes. bcrypt<5 truncated silently; bcrypt>=5
+# raises instead, so truncate explicitly to keep existing hashes verifiable.
+BCRYPT_MAX_BYTES = 72
+
+
+def hash_password(password):
+    return bcrypt.hashpw(password.encode()[:BCRYPT_MAX_BYTES], bcrypt.gensalt()).decode()
+
+
+def check_password(password, pw_hash):
+    return bcrypt.checkpw(password.encode()[:BCRYPT_MAX_BYTES], pw_hash)
+
+
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(config.DATABASE)
@@ -375,7 +388,7 @@ def register():
         flash("Password must be at least 5 characters.")
         return render_template("register.html", bootstrap_enabled=True), 400
 
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    pw_hash = hash_password(password)
     db = get_db()
     # Serialize setup and re-check inside the write transaction. This prevents
     # two simultaneous first-run requests from both creating administrators.
@@ -420,7 +433,7 @@ def login():
     # Always run bcrypt to prevent username enumeration via timing
     dummy_hash = b"$2b$12$GhvMmNVjRW29ulnudl.LbuAnUtN/LRfe1JsBm1Vf3nGJM9XuQ.i51"
     candidate_hash = user["password_hash"].encode() if user else dummy_hash
-    password_ok = bcrypt.checkpw(password.encode(), candidate_hash)
+    password_ok = check_password(password, candidate_hash)
 
     if user and password_ok:
         if user["is_active"] != 1:
@@ -760,11 +773,11 @@ def change_password():
     if new_password != confirm:
         flash("Passwords do not match.")
         return render_template("change_password.html", require_current=require_current), 400
-    if require_current and not bcrypt.checkpw(current.encode(), user["password_hash"].encode()):
+    if require_current and not check_password(current, user["password_hash"].encode()):
         flash("Current password is incorrect.")
         return render_template("change_password.html", require_current=require_current), 403
 
-    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    pw_hash = hash_password(new_password)
     # Bump the epoch so cookies issued before the change stop authenticating.
     # Changing your password is the standard reflex after a suspected
     # compromise, so it has to actually evict whoever else is holding a session.
@@ -813,7 +826,7 @@ def admin_create_user():
         flash("Username already taken.")
         return redirect(url_for("admin_users"))
 
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    pw_hash = hash_password(password)
     db.execute(
         "INSERT INTO users (username, password_hash, must_change_password) VALUES (?, ?, 1)",
         (username, pw_hash),
@@ -860,7 +873,7 @@ def admin_reset_password(user_id):
         flash("Password must be at least 5 characters.")
         return render_template("admin_reset_password.html", user=user), 400
 
-    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    pw_hash = hash_password(new_password)
     # Bump the epoch too. A reset is the remediation for a compromised account,
     # so it must revoke the target's existing cookies -- otherwise the intruder
     # keeps their session *and* inherits the must_change_password exemption in
