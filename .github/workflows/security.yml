@@ -41,16 +41,16 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install hash-locked dependencies
-        run: python -m pip install --require-hashes -r requirements-dev.lock
+        run: python -m pip install --require-hashes -r requirements-dev.txt
 
       - name: Run backend tests
         run: python -m pytest -q
 
       - name: Audit locked dependencies
-        run: python -m pip_audit --requirement requirements.lock --no-deps --disable-pip
+        run: python -m pip_audit --requirement requirements.txt --no-deps --disable-pip
 
       - name: Run Python static analysis
         run: python -m bandit -q -r app.py config.py
