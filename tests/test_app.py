@@ -1319,6 +1319,174 @@ class TestCsrf:
 
 
 # ---------------------------------------------------------------------------
+# External API (token auth)
+# ---------------------------------------------------------------------------
+
+TOKEN = "test-external-token"
+
+
+def bearer(token=TOKEN):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def ext_post(client, payload, token=TOKEN):
+    return client.post(
+        "/api/external/items",
+        data=json.dumps(payload),
+        content_type="application/json",
+        headers=bearer(token),
+    )
+
+
+@pytest.fixture
+def ext_token(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "EXTERNAL_API_TOKEN", TOKEN)
+
+
+class TestExternalAPI:
+    def test_disabled_without_configured_token(self, client):
+        make_list()
+        assert ext_post(client, {"items": [{"name": "Milk"}]}).status_code == 404
+        assert client.get("/api/external/lists", headers=bearer()).status_code == 404
+
+    def test_missing_token_rejected(self, client, ext_token):
+        make_list()
+        rv = jpost(client, "/api/external/items", {"items": [{"name": "Milk"}]})
+        assert rv.status_code == 401
+        assert rv.get_json()["error"] == "unauthorized"
+
+    def test_wrong_token_rejected(self, app, client, ext_token):
+        make_list()
+        assert ext_post(client, {"items": [{"name": "Milk"}]}, token="nope").status_code == 401
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 0
+
+    def test_lists(self, client, ext_token):
+        make_list("Groceries")
+        make_list("Costco")
+        rv = client.get("/api/external/lists", headers=bearer())
+        assert rv.status_code == 200
+        assert [l["name"] for l in rv.get_json()] == ["Groceries", "Costco"]
+
+    def test_batch_insert_into_default_list(self, app, client, ext_token):
+        lid = make_list()
+        rv = ext_post(client, {"items": [
+            {"name": "Chicken breast", "quantity": "2 lb", "notes": "for Fajitas"},
+            {"name": "Tortillas", "section": "later"},
+        ]})
+        assert rv.status_code == 201
+        body = rv.get_json()
+        assert len(body["added"]) == 2 and body["merged"] == []
+        assert body["added"][0]["added_by"] is None
+        assert db_count(app, "SELECT COUNT(*) FROM items WHERE list_id = ?", (lid,)) == 2
+        row = db_query(app, "SELECT section FROM items WHERE name = 'Tortillas'")
+        assert row["section"] == "later"
+        assert db_count(app, "SELECT COUNT(*) FROM item_name_history") == 2
+
+    def test_specific_list(self, app, client, ext_token):
+        make_list("Groceries")
+        costco = make_list("Costco")
+        rv = ext_post(client, {"list_id": costco, "items": [{"name": "Rice"}]})
+        assert rv.status_code == 201
+        assert db_query(app, "SELECT list_id FROM items")["list_id"] == costco
+
+    def test_unknown_list_is_400(self, app, client, ext_token):
+        make_list()
+        rv = ext_post(client, {"list_id": 9999, "items": [{"name": "Rice"}]})
+        assert rv.status_code == 400
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 0
+
+    def test_invalid_item_rejects_whole_batch(self, app, client, ext_token):
+        make_list()
+        rv = ext_post(client, {"items": [{"name": "Rice"}, {"name": ""}]})
+        assert rv.status_code == 400
+        assert "items[1]" in rv.get_json()["error"]
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 0
+
+    @pytest.mark.parametrize("payload", [
+        {}, {"items": []}, {"items": "Milk"}, [1, 2],
+        {"items": [{"name": "x"}] * 101},
+    ])
+    def test_bad_payloads(self, client, ext_token, payload):
+        make_list()
+        assert ext_post(client, payload).status_code == 400
+
+    def test_non_json_body(self, client, ext_token):
+        make_list()
+        rv = client.post("/api/external/items", data="nope", headers=bearer())
+        assert rv.status_code == 400
+
+    def test_merge_folds_into_existing_unbought_item(self, app, client, ext_token):
+        lid = make_list()
+        existing = make_item(lid, name="Milk")
+        rv = ext_post(client, {"merge": True, "items": [
+            {"name": "milk", "quantity": "1 gal", "notes": "for Pancakes"},
+            {"name": "Eggs"},
+        ]})
+        assert rv.status_code == 201
+        body = rv.get_json()
+        assert [i["id"] for i in body["merged"]] == [existing]
+        assert [i["name"] for i in body["added"]] == ["Eggs"]
+        assert db_count(app, "SELECT COUNT(*) FROM items WHERE name = 'Milk' COLLATE NOCASE") == 1
+        assert db_query(app, "SELECT notes FROM items WHERE id = ?", (existing,))["notes"] == "+1 gal for Pancakes"
+
+    def test_merge_ignores_bought_items(self, app, client, ext_token):
+        lid = make_list()
+        make_item(lid, name="Milk", is_bought=1)
+        rv = ext_post(client, {"merge": True, "items": [{"name": "Milk"}]})
+        assert len(rv.get_json()["added"]) == 1
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 2
+
+    def test_without_merge_duplicates_are_inserted(self, app, client, ext_token):
+        lid = make_list()
+        make_item(lid, name="Milk")
+        ext_post(client, {"items": [{"name": "Milk"}]})
+        assert db_count(app, "SELECT COUNT(*) FROM items") == 2
+
+    def test_audit_logged(self, app, client, ext_token):
+        make_list()
+        ext_post(client, {"items": [{"name": "Milk"}]})
+        row = db_query(app, "SELECT action, detail FROM audit_log")
+        assert row["action"] == "external.items_add"
+        assert "1 added" in row["detail"]
+
+    def test_direct_container_call_allowed_when_https_enforced(self, client, ext_token, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ENFORCE_HTTPS", True)
+        make_list()
+        assert ext_post(client, {"items": [{"name": "Milk"}]}).status_code == 201
+
+    def test_proxied_plain_http_still_redirected(self, client, ext_token, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ENFORCE_HTTPS", True)
+        make_list()
+        rv = client.get(
+            "/api/external/lists",
+            headers={**bearer(), "X-Forwarded-Proto": "http", "X-Forwarded-For": "203.0.113.9"},
+        )
+        assert rv.status_code == 308
+
+    def test_proxied_https_allowed(self, client, ext_token, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ENFORCE_HTTPS", True)
+        make_list()
+        rv = client.get(
+            "/api/external/lists",
+            headers={**bearer(), "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9"},
+        )
+        assert rv.status_code == 200
+
+    def test_exempt_from_csrf(self, app, client, ext_token):
+        make_list()
+        app.config["WTF_CSRF_ENABLED"] = True
+        try:
+            rv = ext_post(client, {"items": [{"name": "Milk"}]})
+        finally:
+            app.config["WTF_CSRF_ENABLED"] = False
+        assert rv.status_code == 201
+
+
+# ---------------------------------------------------------------------------
 # PWA / service worker endpoints
 # ---------------------------------------------------------------------------
 

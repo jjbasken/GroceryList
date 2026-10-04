@@ -11,6 +11,7 @@ services:
       - ENFORCE_HTTPS=${ENFORCE_HTTPS:-true}
       - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
       - TRUSTED_PROXY_HOPS=1
+      - EXTERNAL_API_TOKEN=${EXTERNAL_API_TOKEN:-}
     ports:
       # Loopback only: public traffic must come through the Cloudflare tunnel,
       # which reaches web:5000 over grocery-net. Binding 0.0.0.0 would expose
@@ -41,3 +42,6 @@ services:
 
 networks:
   grocery-net:
+    # Fixed name so companion stacks (e.g. MenuPlanner) can join it as an
+    # external network and reach this app at http://web:5000.
+    name: grocery-net
