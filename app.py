@@ -69,6 +69,12 @@ def require_https():
     # The container health check calls /healthz directly over loopback HTTP.
     if request.path == "/healthz":
         return None
+    # Companion containers on grocery-net call the external API directly at
+    # http://web:5000. Those requests carry no X-Forwarded-Proto; anything that
+    # came through the tunnel does, so public plain-HTTP requests are still
+    # redirected.
+    if request.path.startswith("/api/external/") and "X-Forwarded-Proto" not in request.headers:
+        return None
     if config.ENFORCE_HTTPS and not request.is_secure:
         return redirect(request.url.replace("http://", "https://", 1), code=308)
 
@@ -577,52 +583,74 @@ def get_items():
     return jsonify([dict(r) for r in rows])
 
 
-@app.route("/api/items", methods=["POST"])
-@login_required
-def add_item():
-    data = request.get_json()
+def _validate_item(data):
+    """Normalize and validate an item payload. Returns (fields, error)."""
+    if not isinstance(data, dict):
+        return None, "Item must be an object"
     name = (data.get("name") or "").strip()
     section = data.get("section", "now")
     quantity = (data.get("quantity") or "").strip() or None
     notes = (data.get("notes") or "").strip() or None
-    list_id = data.get("list_id")
 
     if not name:
-        return jsonify({"error": "Name is required"}), 400
+        return None, "Name is required"
     if len(name) > 200:
-        return jsonify({"error": "Name too long"}), 400
+        return None, "Name too long"
     if quantity and len(quantity) > 50:
-        return jsonify({"error": "Quantity too long"}), 400
+        return None, "Quantity too long"
     if notes and len(notes) > 500:
-        return jsonify({"error": "Notes too long"}), 400
+        return None, "Notes too long"
     if section not in ("now", "later"):
-        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+        return None, "Section must be 'now' or 'later'"
+    return {"name": name, "section": section, "quantity": quantity, "notes": notes}, None
 
-    db = get_db()
-    if list_id is None:
-        first = db.execute("SELECT id FROM lists ORDER BY id LIMIT 1").fetchone()
-        list_id = first["id"] if first else None
 
+def _default_list_id(db):
+    first = db.execute("SELECT id FROM lists ORDER BY id LIMIT 1").fetchone()
+    return first["id"] if first else None
+
+
+def _insert_item(db, fields, list_id, added_by):
+    """Insert a validated item and record its name for autocomplete. No commit."""
     cur = db.execute(
         "INSERT INTO items (name, section, quantity, notes, list_id, added_by) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, section, quantity, notes, list_id, session["user_id"]),
+        (fields["name"], fields["section"], fields["quantity"], fields["notes"], list_id, added_by),
     )
     db.execute(
         "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
         "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
-        (name,),
+        (fields["name"],),
     )
-    db.commit()
+    return cur.lastrowid
 
-    item = db.execute(
+
+def _fetch_item(db, item_id):
+    return db.execute(
         "SELECT items.*, users.username AS added_by_name "
         "FROM items LEFT JOIN users ON items.added_by = users.id "
         "WHERE items.id = ?",
-        (cur.lastrowid,),
+        (item_id,),
     ).fetchone()
 
+
+@app.route("/api/items", methods=["POST"])
+@login_required
+def add_item():
+    data = request.get_json()
+    fields, error = _validate_item(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    db = get_db()
+    list_id = data.get("list_id")
+    if list_id is None:
+        list_id = _default_list_id(db)
+
+    item_id = _insert_item(db, fields, list_id, session["user_id"])
+    db.commit()
+
     broadcast("update")
-    return jsonify(dict(item)), 201
+    return jsonify(dict(_fetch_item(db, item_id))), 201
 
 
 # NOTE: Item and list mutations below intentionally allow any authenticated user to
@@ -738,6 +766,106 @@ def clear_bought():
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# External API (token auth, for companion apps such as MenuPlanner)
+# ---------------------------------------------------------------------------
+
+MAX_EXTERNAL_ITEMS = 100
+
+
+def external_token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Disabled entirely unless a token is configured, so a deployment that
+        # doesn't use the integration exposes nothing new.
+        if not config.EXTERNAL_API_TOKEN:
+            return jsonify({"error": "not found"}), 404
+        header = request.headers.get("Authorization", "")
+        scheme, _, token = header.partition(" ")
+        if scheme != "Bearer" or not hmac.compare_digest(
+            token.encode(), config.EXTERNAL_API_TOKEN.encode()
+        ):
+            return jsonify({"error": "unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/api/external/lists")
+@csrf.exempt
+@external_token_required
+def external_lists():
+    rows = get_db().execute("SELECT id, name FROM lists ORDER BY id").fetchall()
+    return jsonify([{"id": r["id"], "name": r["name"]} for r in rows])
+
+
+@app.route("/api/external/items", methods=["POST"])
+@csrf.exempt  # bearer-token auth; no cookies involved, so no CSRF exposure
+@external_token_required
+def external_add_items():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "items must be a non-empty list"}), 400
+    if len(items) > MAX_EXTERNAL_ITEMS:
+        return jsonify({"error": f"At most {MAX_EXTERNAL_ITEMS} items per request"}), 400
+    merge = bool(data.get("merge", False))
+
+    validated = []
+    for i, raw in enumerate(items):
+        fields, error = _validate_item(raw)
+        if error:
+            return jsonify({"error": f"items[{i}]: {error}"}), 400
+        validated.append(fields)
+
+    db = get_db()
+    list_id = data.get("list_id")
+    if list_id is None:
+        list_id = _default_list_id(db)
+    elif not isinstance(list_id, int) or db.execute(
+        "SELECT 1 FROM lists WHERE id = ?", (list_id,)
+    ).fetchone() is None:
+        return jsonify({"error": "List not found"}), 400
+    if list_id is None:
+        return jsonify({"error": "No lists exist"}), 400
+
+    added, merged = [], []
+    for fields in validated:
+        existing = None
+        if merge:
+            existing = db.execute(
+                "SELECT id, quantity, notes FROM items "
+                "WHERE list_id = ? AND is_bought = 0 AND name = ? COLLATE NOCASE "
+                "ORDER BY id LIMIT 1",
+                (list_id, fields["name"]),
+            ).fetchone()
+        if existing is None:
+            added.append(_insert_item(db, fields, list_id, None))
+            continue
+        # Don't create a duplicate row: fold what the new request asked for into
+        # the existing item's notes so nothing is silently lost.
+        extra = " ".join(p for p in (fields["quantity"], fields["notes"]) if p)
+        if extra:
+            notes = f"{existing['notes']}; +{extra}" if existing["notes"] else f"+{extra}"
+            db.execute(
+                "UPDATE items SET notes = ?, updated_at = datetime('now') WHERE id = ?",
+                (notes[:500], existing["id"]),
+            )
+        merged.append(existing["id"])
+
+    log_audit(
+        "external.items_add",
+        f"External API: {len(added)} added, {len(merged)} merged into list {list_id}",
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({
+        "added": [dict(_fetch_item(db, i)) for i in added],
+        "merged": [dict(_fetch_item(db, i)) for i in merged],
+    }), 201
 
 
 # ---------------------------------------------------------------------------

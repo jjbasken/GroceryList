@@ -10,3 +10,6 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
 # can sit open for days between page renders, so a timed token would go stale
 # and break writes until a manual refresh. Tokens are still session-bound.
 WTF_CSRF_TIME_LIMIT = None
+# Shared secret for the token-authenticated /api/external/* endpoints used by
+# companion apps (e.g. MenuPlanner). Unset = those endpoints return 404.
+EXTERNAL_API_TOKEN = os.environ.get("EXTERNAL_API_TOKEN") or None
