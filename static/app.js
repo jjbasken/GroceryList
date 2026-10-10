@@ -128,12 +128,13 @@
 
     async function api(url, opts = {}) {
         const method = (opts.method || 'GET').toUpperCase();
+        const operationListId = currentListId;
         const doFetch = () => fetch(url, {
             ...opts,
             headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId, ...opts.headers },
         });
         const queueOp = async () => {
-            await pushQueue({ accountId, listId: currentListId, method, url, body: opts.body || null });
+            await pushQueue({ accountId, listId: operationListId, method, url, body: opts.body || null });
             return { ok: true, queued: true };
         };
 

@@ -409,3 +409,29 @@ test('permanent sync failures keep input and let the user discard only the faile
     assert.equal(writes.length, 2);
     assert.match(writes[1].body, /Bread/);
 });
+
+
+test('a network failure after switching lists keeps the operation on its original list', async () => {
+    let rejectWrite;
+    const p = page([], true, {
+        network: async (url, opts) => {
+            if (opts.method === 'POST') return new Promise((resolve, reject) => { rejectWrite = reject; });
+            return new Response(url === '/api/lists' ? '[{"id":1,"name":"Groceries"},{"id":2,"name":"Costco"}]' : '[]');
+        },
+    });
+    await settle();
+    p.element('item-input').value = 'Milk';
+    const adding = p.element('add-btn').listeners.click();
+    await settle();
+    p.element('list-select').value = '2';
+    p.element('list-select').listeners.change();
+    rejectWrite(new TypeError('offline'));
+    await adding;
+    await settle();
+    assert.equal([...p.indexedDB.rows.values()][0].listId, 1);
+    assert.doesNotMatch(textOf(p.element('#section-now .item-list')), /Milk/);
+    p.element('list-select').value = '1';
+    p.element('list-select').listeners.change();
+    await settle();
+    assert.match(textOf(p.element('#section-now .item-list')), /Milk/);
+});
