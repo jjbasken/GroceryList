@@ -1,0 +1,3 @@
+# Keep this review-request list aligned with the pr-approval environment reviewers.
+# Approval is enforced by the environment, allowing authors to approve their own PRs.
+* @jjbasken

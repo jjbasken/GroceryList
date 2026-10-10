@@ -101,3 +101,55 @@ def test_private_responses_bypass_http_cache(client):
         assert response.headers['Cache-Control'] == 'no-store'
         assert response.headers['X-Account-ID'] == client.environ_base['HTTP_X_ACCOUNT_ID']
     assert client.post('/logout').headers['Cache-Control'] == 'no-store'
+
+
+def test_disabled_account_cookies_stay_revoked_after_reenable(app, client):
+    make_user('admin', role='admin')
+    user_id = make_user('member')
+    member = app.test_client()
+    do_login(member, 'member')
+    old_cookie = member.get_cookie('session').value
+    do_login(client, 'admin')
+    client.post(f'/admin/users/{user_id}/disable')
+    client.post(f'/admin/users/{user_id}/disable')
+    member.set_cookie('session', old_cookie)
+    assert member.get('/api/lists').status_code == 401
+    assert do_login(member, 'member').status_code == 302
+    assert member.get('/api/lists').status_code == 200
+
+
+@pytest.mark.parametrize('payload', [None, [], {'name': 123}, {'name': 'Milk', 'quantity': []}, {'name': 'Milk', 'notes': True}])
+def test_invalid_item_payloads_are_client_errors(client, payload):
+    from conftest import make_item
+    make_user()
+    list_id = make_list()
+    item_id = make_item(list_id)
+    do_login(client)
+    for method, path in [('POST', '/api/items'), ('PUT', f'/api/items/{item_id}')]:
+        response = client.open(path, method=method, json=payload, content_type='application/json')
+        assert response.status_code == 400
+        assert response.is_json
+
+
+@pytest.mark.parametrize('list_id', [999999, '1', [], True])
+def test_add_item_rejects_unknown_or_invalid_list(client, list_id):
+    make_user()
+    make_list()
+    do_login(client)
+    response = client.post('/api/items', json={'name': 'Milk', 'list_id': list_id})
+    assert response.status_code == 404
+    assert response.json['error'] == 'List not found'
+
+
+def test_list_changes_broadcast_metadata_refresh(client, monkeypatch):
+    import queue
+    make_user(role='admin')
+    make_list()
+    do_login(client)
+    messages = queue.Queue()
+    monkeypatch.setattr('app.subscribers', [messages])
+    response = client.post('/api/lists', json={'name': 'Costco'})
+    assert response.status_code == 201
+    assert messages.get_nowait().startswith('event: lists\n')
+    assert client.delete(f"/api/lists/{response.json['id']}").status_code == 200
+    assert messages.get_nowait().startswith('event: lists\n')

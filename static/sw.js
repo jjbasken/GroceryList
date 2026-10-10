@@ -46,7 +46,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
     // Legacy caches and unbound operations cannot be assigned to an account.
     event.waitUntil(Promise.all([
-        withStorage(() => GroceryOffline.clearPrivateData()),
+        withStorage(() => GroceryOffline.clearPrivateData({ legacyOnly: true })),
         caches.keys().then(keys => Promise.all(keys
             .filter(key => key.startsWith('grocery-static-') && key !== SHELL_CACHE)
             .map(key => caches.delete(key)))),

@@ -10,7 +10,16 @@
 
     // ---- Local state ----
     let localItems = [];
-    let localItemsDirty = false;
+    let serverItems = [];
+    let serverListId = null;
+    let loadGeneration = 0;
+    let listsGeneration = 0;
+
+    function showMessage(message = '') {
+        const box = document.getElementById('app-message');
+        box.textContent = message;
+        box.hidden = !message;
+    }
 
     // ---- IndexedDB helpers ----
 
@@ -29,9 +38,9 @@
         const db = await openDB();
         return new Promise((resolve, reject) => {
             const tx = db.transaction('op-queue', 'readwrite');
-            tx.objectStore('op-queue').add(op);
-            tx.oncomplete = resolve;
-            tx.onerror = (e) => reject(e.target.error);
+            const request = tx.objectStore('op-queue').add(op);
+            tx.oncomplete = () => { db.close(); resolve(request.result); };
+            tx.onerror = (e) => { db.close(); reject(e.target.error); };
         });
     }
 
@@ -41,10 +50,10 @@
             const tx = db.transaction('op-queue', 'readonly');
             const store = tx.objectStore('op-queue');
             let ops = null, keys = null;
-            const done = () => { if (ops !== null && keys !== null) resolve({ ops, keys }); };
+            const done = () => { if (ops !== null && keys !== null) { db.close(); resolve({ ops, keys }); } };
             store.getAll().onsuccess = (e) => { ops = e.target.result; done(); };
             store.getAllKeys().onsuccess = (e) => { keys = e.target.result; done(); };
-            tx.onerror = (e) => reject(e.target.error);
+            tx.onerror = (e) => { db.close(); reject(e.target.error); };
         });
     }
 
@@ -53,19 +62,18 @@
         return new Promise((resolve, reject) => {
             const tx = db.transaction('op-queue', 'readwrite');
             tx.objectStore('op-queue').delete(key);
-            tx.oncomplete = resolve;
-            tx.onerror = (e) => reject(e.target.error);
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = (e) => { db.close(); reject(e.target.error); };
         });
     }
 
     // ---- Optimistic local mutations ----
 
-    function applyOptimistic(method, url, bodyStr) {
-        localItemsDirty = true;
+    function applyOptimistic(method, url, bodyStr, key) {
         const body = bodyStr ? JSON.parse(bodyStr) : {};
         if (method === 'POST' && url === '/api/items') {
             localItems.unshift({
-                id: 'pending-' + Date.now(),
+                id: 'pending-' + key,
                 name: body.name,
                 section: body.section || 'now',
                 quantity: body.quantity || null,
@@ -125,9 +133,8 @@
             headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId, ...opts.headers },
         });
         const queueOp = async () => {
-            await pushQueue({ accountId, method, url, body: opts.body || null });
-            applyOptimistic(method, url, opts.body || null);
-            return { ok: true };
+            await pushQueue({ accountId, listId: currentListId, method, url, body: opts.body || null });
+            return { ok: true, queued: true };
         };
 
         if (method !== 'GET' && !navigator.onLine) return queueOp();
@@ -158,60 +165,123 @@
                 return null;
             }
         }
-        return res.json().catch(() => null);
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+            showMessage(data?.error || `Request failed (${res.status}). Please try again.`);
+            return null;
+        }
+        return data;
     }
 
     // ---- Flush offline queue ----
 
-    async function flushQueue() {
+    let flushing = null;
+    let retryTimer = null;
+    let retryDelay = 1000;
+
+    function retrySync(response) {
+        const retryAfter = response?.headers.get('Retry-After');
+        let delay = retryDelay;
+        if (retryAfter) {
+            const seconds = Number(retryAfter);
+            delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+        }
+        retryDelay = Math.min(retryDelay * 2, 60000);
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(() => { retryTimer = null; flushQueue(); }, Math.max(1000, delay || 0));
+    }
+
+    function flushQueue() {
+        if (!navigator.onLine) return Promise.resolve();
+        if (flushing) return flushing;
+        // Web Locks serialize replay across every tab/PWA window on this origin.
+        // Without them, keep pending data rather than risk replaying it twice.
+        if (!navigator.locks) {
+            return getAllQueue().then(({ ops }) => {
+                if (ops.length) showMessage('Offline changes are saved. Sync them using a current browser with Web Locks support.');
+            });
+        }
+        flushing = navigator.locks.request('grocery-offline-sync', () => replayQueue())
+            .finally(() => { flushing = null; });
+        return flushing;
+    }
+
+    function showQueueFailure(op, key, error) {
+        const body = op.body ? JSON.parse(op.body) : {};
+        const description = body.name ? ` for "${body.name}"` : '';
+        showMessage(`An offline change${description} could not sync: ${error}. Your queued changes are saved.`);
+        const box = document.getElementById('app-message');
+        const retry = document.createElement('button');
+        retry.textContent = 'Retry sync';
+        retry.addEventListener('click', () => flushQueue());
+        const discard = document.createElement('button');
+        discard.textContent = 'Discard failed change';
+        discard.addEventListener('click', async () => {
+            const remove = () => deleteQueueEntry(key);
+            if (navigator.locks) await navigator.locks.request('grocery-offline-sync', remove);
+            else await remove();
+            showMessage();
+            await flushQueue();
+            await loadItems();
+        });
+        box.appendChild(retry);
+        box.appendChild(discard);
+    }
+
+    async function replayQueue() {
         const { ops, keys } = await getAllQueue();
         if (ops.length === 0) return;
-
         showSyncIndicator(true);
-        for (let i = 0; i < ops.length; i++) {
-            const op = ops[i];
-            const key = keys[i];
-            // Legacy operations have no identity and cannot safely be replayed.
-            if (op.accountId !== accountId) {
-                await deleteQueueEntry(key);
-                continue;
-            }
-            const replay = () => fetch(op.url, {
-                method: op.method,
-                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId },
-                body: op.body || undefined,
-            });
-            try {
-                let res = await replay();
-                // Page token may be stale (queued ops can outlive a render);
-                // refresh and retry once rather than dropping the write below.
-                if (await isCsrfFailure(res) && await refreshCsrfToken()) {
-                    res = await replay();
+        try {
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
+                const key = keys[i];
+                if (op.accountId !== accountId) {
+                    await deleteQueueEntry(key);
+                    continue;
                 }
-                if (res.status === 401 || res.status === 409) {
-                    showSyncIndicator(false);
-                    window.location.href = '/login';
-                    return;
-                }
-                if (res.status === 403) {
-                    const error = await res.clone().json().catch(() => null);
-                    if (error && error.error === 'password_change_required') {
-                        window.location.href = '/change-password';
+                const replay = () => fetch(op.url, {
+                    method: op.method,
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken, 'X-Account-ID': accountId },
+                    body: op.body || undefined,
+                });
+                try {
+                    let res = await replay();
+                    if (await isCsrfFailure(res) && await refreshCsrfToken()) res = await replay();
+                    if (res.status === 401 || res.status === 409) {
+                        window.location.href = '/login';
                         return;
                     }
+                    if (res.status === 403) {
+                        const error = await res.clone().json().catch(() => null);
+                        if (error?.error === 'password_change_required') {
+                            window.location.href = '/change-password';
+                            return;
+                        }
+                    }
+                    if (res.status === 429 || res.status >= 500 || await isCsrfFailure(res)) {
+                        showMessage('Sync is temporarily unavailable. Your offline changes are saved and will be retried.');
+                        retrySync(res);
+                        break;
+                    }
+                    if (!res.ok) {
+                        const error = await res.clone().json().catch(() => null);
+                        // Keep the failed operation available instead of losing input.
+                        showQueueFailure(op, key, error?.error || res.status);
+                        break;
+                    }
+                    await deleteQueueEntry(key);
+                    retryDelay = 1000;
+                } catch (e) {
+                    retrySync();
+                    break;
                 }
-                if (res.status >= 500) break;
-                // Remove on 2xx or 4xx (conflict/gone -- no retry for client errors)
-                await deleteQueueEntry(key);
-            } catch (e) {
-                // Network error mid-flush: stop and retry on next online event
-                break;
             }
+        } finally {
+            showSyncIndicator(false);
+            await loadLists();
+            await loadItems();
         }
-        localItemsDirty = false;
-        showSyncIndicator(false);
-        await loadLists();
-        loadItems();
     }
 
     // ---- Offline UI ----
@@ -240,7 +310,6 @@
         if (e.persisted) {
             // Restored from BFCache — reset stale in-memory state and reload
             localItems = [];
-            localItemsDirty = false;
             loadLists().then(() => loadItems());
         }
     });
@@ -296,8 +365,9 @@
     }
 
     async function loadLists() {
+        const generation = ++listsGeneration;
         const lists = await api("/api/lists");
-        if (!lists || !lists.length) return;
+        if (generation !== listsGeneration || !Array.isArray(lists) || !lists.length) return;
         currentLists = lists;
 
         listSelect.innerHTML = "";
@@ -310,6 +380,8 @@
 
         if (currentListId === null || !lists.find(l => l.id === currentListId)) {
             currentListId = lists[0].id;
+            editingId = null;
+            loadGeneration++;
         }
         listSelect.value = currentListId;
         updateDeleteListBtn();
@@ -546,7 +618,6 @@
         const save = () => {
             const name = nameInput.value.trim();
             if (!name) { nameInput.focus(); return; }
-            editingId = null;
             saveEdit(item.id, {
                 name,
                 quantity: qtyInput.value.trim() || null,
@@ -596,19 +667,28 @@
     // ---- Actions ----
 
     async function loadItems() {
-        if (!currentListId) return;
-        // Don't clobber an in-progress inline edit with a background refresh
-        if (editingId !== null) return;
-        // If we have unsynced optimistic mutations, render from local state
-        // rather than overwriting it with a (potentially stale) cached response
-        if (localItemsDirty) {
-            renderItems(localItems);
-            return;
+        if (!currentListId || editingId !== null) return;
+        const listId = currentListId;
+        const generation = ++loadGeneration;
+        const items = await api("/api/items?list_id=" + listId);
+        const { ops, keys } = await getAllQueue();
+        if (generation !== loadGeneration || listId !== currentListId || editingId !== null) return;
+        if (Array.isArray(items)) {
+            serverItems = items;
+            serverListId = listId;
+        } else if (serverListId !== listId) {
+            serverItems = [];
+            serverListId = listId;
         }
-        const items = await api("/api/items?list_id=" + currentListId);
-        if (items) {
-            localItems = items;
-        }
+        localItems = serverItems.map(item => ({ ...item }));
+        ops.forEach((op, index) => {
+            if (op.accountId !== accountId) return;
+            const body = op.body ? JSON.parse(op.body) : {};
+            const opList = op.listId ?? body.list_id;
+            if (opList != null && opList !== listId) return;
+            if (!op.url.startsWith('/api/items') || op.url.startsWith('/api/items/history')) return;
+            applyOptimistic(op.method, op.url, op.body, keys[index]);
+        });
         renderItems(localItems);
     }
 
@@ -618,14 +698,16 @@
         const section = sectionSelect.value;
         const quantity = qtyInput.value.trim() || null;
         const notes = notesInput.value.trim() || null;
-        itemInput.value = "";
-        qtyInput.value = "";
-        notesInput.value = "";
-        await api("/api/items", {
+        const result = await api("/api/items", {
             method: "POST",
             body: JSON.stringify({ name, section, quantity, notes, list_id: currentListId }),
         });
-        loadItems();
+        if (!result) return;
+        showMessage();
+        if (itemInput.value.trim() === name) itemInput.value = "";
+        if (qtyInput.value.trim() === (quantity || "")) qtyInput.value = "";
+        if (notesInput.value.trim() === (notes || "")) notesInput.value = "";
+        await loadItems();
         loadHistory();
     }
 
@@ -645,10 +727,13 @@
     }
 
     async function saveEdit(id, payload) {
-        await api("/api/items/" + id, {
+        const result = await api("/api/items/" + id, {
             method: "PUT",
             body: JSON.stringify(payload),
         });
+        if (!result) return;
+        editingId = null;
+        showMessage();
         loadItems();
         loadHistory();
     }
@@ -715,10 +800,11 @@
 
     listSelect.addEventListener("change", () => {
         currentListId = parseInt(listSelect.value, 10);
+        editingId = null;
+        loadGeneration++;
         updateDeleteListBtn();
         // Clear local state when switching lists so loadItems fetches fresh
         localItems = [];
-        localItemsDirty = false;
         loadItems();
     });
     newListBtn.addEventListener("click", createList);
@@ -738,7 +824,8 @@
     function connectSSE() {
         const es = new EventSource("/api/stream");
         // Skip SSE-triggered reloads while we have unsynced local mutations
-        es.addEventListener("update", () => { if (!localItemsDirty) loadItems(); });
+        es.addEventListener("update", () => loadItems());
+        es.addEventListener("lists", () => loadLists().then(() => loadItems()));
         es.onerror = () => {
             es.close();
             setTimeout(connectSSE, 3000);

@@ -161,6 +161,12 @@ must sign in again once after upgrading. Let connected devices finish syncing
 before deploying: the updated service worker removes legacy offline caches and
 queued changes because they cannot safely be assigned to an account.
 
+Offline sync requires a current browser with Web Locks support (current Chrome,
+Edge, Firefox, and Safari). Queue replay is serialized across tabs, temporary
+server errors and rate limits retain pending writes for retry, and app-shell
+updates preserve current account caches and queued changes. Reopening the app
+or switching lists reconstructs pending changes over the cached server data.
+
 Offline data belongs to the account that loaded the page. Logout, sign-in,
 password changes, and account switches clear private browser caches and pending
 changes. API writes require an `X-Account-ID` header matching the authenticated
@@ -180,6 +186,35 @@ changing an `.in` file, regenerate its `.txt` with
 dependency auditing, Bandit, a full-history secret scan, and a production
 container build. Dependabot checks Python, Docker, and GitHub Actions inputs
 weekly.
+
+## Pull requests and security
+
+The default branch is currently `master`. Repository rules protect both `master`
+and `main` (and follow the default branch if it changes). Changes require a pull
+request, passing security checks, resolved review conversations, and a successful
+`pr-approval` environment approval. Direct pushes, force pushes, and branch deletion
+are blocked, with no bypass actors.
+
+GitHub does not let PR authors approve their own PR reviews. Instead, the
+`PR approval` workflow waits for **one reviewer from the `pr-approval` environment**.
+The current reviewer list is `jjbasken`; self-review is allowed and administrator
+bypass is disabled. Open the PR's approval workflow, select **Review deployments**,
+and approve `pr-approval`. This records approval only; the job does not deploy the
+application. Each new commit requires approval of its new revision. Other required
+checks must still pass before merge. Native PR approving-review count is zero
+because the environment enforces the one-person approval requirement.
+
+To add approvers, update the environment's required reviewers in **Settings →
+Environments → pr-approval** and keep `.github/CODEOWNERS` and Dependabot's review
+requests aligned. The environment's reviewer list is authoritative.
+
+Dependabot checks Python dependencies, container images, and GitHub Actions weekly
+and opens security update PRs. GitHub secret scanning and push protection scan for
+leaked credentials. CodeQL default setup scans Python, JavaScript, and Actions;
+the branch rules block new high/critical security findings and error-level code
+scanning findings. CI also runs pip-audit, Bandit, Gitleaks, backend and browser
+regressions, a container build, and dependency review on PRs. Scheduled security
+checks run weekly so existing dependencies continue to be audited.
 
 ## Project Structure
 

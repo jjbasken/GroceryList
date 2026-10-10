@@ -2,13 +2,14 @@
 (function (scope) {
     'use strict';
 
-    async function clearPrivateData() {
+    async function clearPrivateData({ legacyOnly = false } = {}) {
         await Promise.all([
             caches.keys().then(keys => Promise.all(keys
                 // App-shell assets contain no account data and remain available
                 // offline. The service worker removes superseded shell versions
                 // during activation.
-                .filter(key => key.startsWith('grocery-') && !key.startsWith('grocery-static-'))
+                .filter(key => key.startsWith('grocery-') && !key.startsWith('grocery-static-')
+                    && (!legacyOnly || (!key.startsWith('grocery-private-v2-') && key !== 'grocery-session-v2')))
                 .map(key => caches.delete(key)))),
             new Promise((resolve, reject) => {
                 const request = indexedDB.open('grocery-offline', 1);
@@ -19,7 +20,18 @@
                 request.onsuccess = () => {
                     const db = request.result;
                     const tx = db.transaction('op-queue', 'readwrite');
-                    tx.objectStore('op-queue').clear();
+                    const store = tx.objectStore('op-queue');
+                    if (legacyOnly) {
+                        const cursor = store.openCursor();
+                        cursor.onsuccess = () => {
+                            const row = cursor.result;
+                            if (!row) return;
+                            if (!row.value.accountId) row.delete();
+                            row.continue();
+                        };
+                    } else {
+                        store.clear();
+                    }
                     tx.oncomplete = () => { db.close(); resolve(); };
                     tx.onerror = () => { db.close(); reject(tx.error); };
                 };

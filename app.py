@@ -507,8 +507,10 @@ def get_lists():
 @app.route("/api/lists", methods=["POST"])
 @login_required
 def create_list():
-    data = request.get_json()
-    name = (data.get("name") or "").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("name", ""), str):
+        return jsonify({"error": "Name must be a string"}), 400
+    name = data.get("name", "").strip()
     if not name:
         return jsonify({"error": "Name is required"}), 400
     if len(name) > 100:
@@ -519,6 +521,7 @@ def create_list():
         (name, session["user_id"]),
     )
     db.commit()
+    broadcast("lists")
     return jsonify({"id": cur.lastrowid, "name": name}), 201
 
 
@@ -540,7 +543,7 @@ def delete_list(list_id):
     db.execute("DELETE FROM lists WHERE id = ?", (list_id,))
     log_audit("list.delete", f"Deleted list '{lst['name']}'")
     db.commit()
-    broadcast("update")
+    broadcast("lists")
     return jsonify({"ok": True})
 
 
@@ -587,6 +590,9 @@ def _validate_item(data):
     """Normalize and validate an item payload. Returns (fields, error)."""
     if not isinstance(data, dict):
         return None, "Item must be an object"
+    for key in ("name", "quantity", "notes"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            return None, f"{key} must be a string"
     name = (data.get("name") or "").strip()
     section = data.get("section", "now")
     quantity = (data.get("quantity") or "").strip() or None
@@ -636,7 +642,7 @@ def _fetch_item(db, item_id):
 @app.route("/api/items", methods=["POST"])
 @login_required
 def add_item():
-    data = request.get_json()
+    data = request.get_json(silent=True)
     fields, error = _validate_item(data)
     if error:
         return jsonify({"error": error}), 400
@@ -645,6 +651,11 @@ def add_item():
     list_id = data.get("list_id")
     if list_id is None:
         list_id = _default_list_id(db)
+
+    if type(list_id) is not int or db.execute(
+        "SELECT 1 FROM lists WHERE id = ?", (list_id,)
+    ).fetchone() is None:
+        return jsonify({"error": "List not found"}), 404
 
     item_id = _insert_item(db, fields, list_id, session["user_id"])
     db.commit()
@@ -692,22 +703,11 @@ def move_item(item_id):
 @app.route("/api/items/<int:item_id>", methods=["PUT"])
 @login_required
 def update_item(item_id):
-    data = request.get_json()
-    name = (data.get("name") or "").strip()
-    section = data.get("section", "now")
-    quantity = (data.get("quantity") or "").strip() or None
-    notes = (data.get("notes") or "").strip() or None
-
-    if not name:
-        return jsonify({"error": "Name is required"}), 400
-    if len(name) > 200:
-        return jsonify({"error": "Name too long"}), 400
-    if quantity and len(quantity) > 50:
-        return jsonify({"error": "Quantity too long"}), 400
-    if notes and len(notes) > 500:
-        return jsonify({"error": "Notes too long"}), 400
-    if section not in ("now", "later"):
-        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+    fields, error = _validate_item(request.get_json(silent=True))
+    if error:
+        return jsonify({"error": error}), 400
+    name, section = fields["name"], fields["section"]
+    quantity, notes = fields["quantity"], fields["notes"]
 
     db = get_db()
     if db.execute("SELECT id FROM items WHERE id = ?", (item_id,)).fetchone() is None:
@@ -972,7 +972,11 @@ def admin_disable_user(user_id):
         return redirect(url_for("admin_users"))
     db = get_db()
     target = db.execute("SELECT username, is_active FROM users WHERE id = ?", (user_id,)).fetchone()
-    db.execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (user_id,))
+    db.execute(
+        "UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END, "
+        "session_epoch = session_epoch + CASE WHEN is_active = 1 THEN 1 ELSE 0 END "
+        "WHERE id = ?", (user_id,)
+    )
     if target:
         verb = "Disabled" if target["is_active"] == 1 else "Enabled"
         log_audit("admin.user_toggle", f"{verb} user '{target['username']}'")
