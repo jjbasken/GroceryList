@@ -161,6 +161,12 @@ must sign in again once after upgrading. Let connected devices finish syncing
 before deploying: the updated service worker removes legacy offline caches and
 queued changes because they cannot safely be assigned to an account.
 
+Offline sync requires a current browser with Web Locks support (current Chrome,
+Edge, Firefox, and Safari). Queue replay is serialized across tabs, temporary
+server errors and rate limits retain pending writes for retry, and app-shell
+updates preserve current account caches and queued changes. Reopening the app
+or switching lists reconstructs pending changes over the cached server data.
+
 Offline data belongs to the account that loaded the page. Logout, sign-in,
 password changes, and account switches clear private browser caches and pending
 changes. API writes require an `X-Account-ID` header matching the authenticated
@@ -180,6 +186,34 @@ changing an `.in` file, regenerate its `.txt` with
 dependency auditing, Bandit, a full-history secret scan, and a production
 container build. Dependabot checks Python, Docker, and GitHub Actions inputs
 weekly.
+
+## Pull requests and security
+
+The default branch is currently `master`. Repository rules protect both `master`
+and `main` (and follow the default branch if it changes). Changes require a pull
+request, passing security checks, and resolved review conversations. Direct pushes,
+force pushes, and branch deletion are blocked. These core protections have no
+bypass actors.
+
+A separate native GitHub review ruleset requires one approving review from a code
+owner listed in `.github/CODEOWNERS` (currently `jjbasken`). GitHub does not let an
+author approve their own PR review, so `jjbasken` alone can bypass this **review
+ruleset through a PR**. When merging your own PR, use GitHub's review-bypass option;
+you do not need a second reviewer or a separate deployment approval. This bypass
+does not waive the PR requirement, security checks, or other core protections.
+Other contributors must obtain a code owner's approval.
+
+To add approvers, update `.github/CODEOWNERS` and keep Dependabot's review requests
+aligned. The owner-only bypass is configured separately in the repository's
+**Settings → Rules → Rulesets**, and applies only to the review ruleset.
+
+Dependabot checks Python dependencies, container images, and GitHub Actions weekly
+and opens security update PRs. GitHub secret scanning and push protection scan for
+leaked credentials. CodeQL default setup scans Python, JavaScript, and Actions;
+the branch rules block new high/critical security findings and error-level code
+scanning findings. CI also runs pip-audit, Bandit, Gitleaks, backend and browser
+regressions, a container build, and dependency review on PRs. Scheduled security
+checks run weekly so existing dependencies continue to be audited.
 
 ## Project Structure
 
