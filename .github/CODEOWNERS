@@ -1,3 +1,4 @@
-# Keep this review-request list aligned with the pr-approval environment reviewers.
-# Approval is enforced by the environment, allowing authors to approve their own PRs.
+# At least one listed code owner must approve changes from other contributors.
+# The repository owner can bypass this review rule through a PR; security checks
+# and PR-only branch protections have no bypass actors.
 * @jjbasken

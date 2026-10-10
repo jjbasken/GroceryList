@@ -191,22 +191,21 @@ weekly.
 
 The default branch is currently `master`. Repository rules protect both `master`
 and `main` (and follow the default branch if it changes). Changes require a pull
-request, passing security checks, resolved review conversations, and a successful
-`pr-approval` environment approval. Direct pushes, force pushes, and branch deletion
-are blocked, with no bypass actors.
+request, passing security checks, and resolved review conversations. Direct pushes,
+force pushes, and branch deletion are blocked. These core protections have no
+bypass actors.
 
-GitHub does not let PR authors approve their own PR reviews. Instead, the
-`PR approval` workflow waits for **one reviewer from the `pr-approval` environment**.
-The current reviewer list is `jjbasken`; self-review is allowed and administrator
-bypass is disabled. Open the PR's approval workflow, select **Review deployments**,
-and approve `pr-approval`. This records approval only; the job does not deploy the
-application. Each new commit requires approval of its new revision. Other required
-checks must still pass before merge. Native PR approving-review count is zero
-because the environment enforces the one-person approval requirement.
+A separate native GitHub review ruleset requires one approving review from a code
+owner listed in `.github/CODEOWNERS` (currently `jjbasken`). GitHub does not let an
+author approve their own PR review, so `jjbasken` alone can bypass this **review
+ruleset through a PR**. When merging your own PR, use GitHub's review-bypass option;
+you do not need a second reviewer or a separate deployment approval. This bypass
+does not waive the PR requirement, security checks, or other core protections.
+Other contributors must obtain a code owner's approval.
 
-To add approvers, update the environment's required reviewers in **Settings →
-Environments → pr-approval** and keep `.github/CODEOWNERS` and Dependabot's review
-requests aligned. The environment's reviewer list is authoritative.
+To add approvers, update `.github/CODEOWNERS` and keep Dependabot's review requests
+aligned. The owner-only bypass is configured separately in the repository's
+**Settings → Rules → Rulesets**, and applies only to the review ruleset.
 
 Dependabot checks Python dependencies, container images, and GitHub Actions weekly
 and opens security update PRs. GitHub secret scanning and push protection scan for
