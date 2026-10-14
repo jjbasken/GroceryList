@@ -225,9 +225,16 @@ def scale_qty(qty, recipe_servings, servings):
     return qty * servings / recipe_servings
 
 
-_WHOLE_RE = re.compile(r"\d+(?:\.\d+)?")
-_FRACTION_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
-_MIXED_RE = re.compile(r"(\d+(?:\.\d+)?)\s+(\d+)\s*/\s*(\d+)")
+def _digits(s):
+    return s.isascii() and s.isdigit()
+
+
+def _decimal(s):
+    """"2" or "1.5" -> float; anything else -> None."""
+    whole, dot, frac = s.partition(".")
+    if _digits(whole) and (not dot or _digits(frac)):
+        return float(s)
+    return None
 
 
 def parse_qty(text):
@@ -243,22 +250,32 @@ def parse_qty(text):
         s = s[:-1].strip()
         if not s:
             return total
-    # Three separate shapes rather than one pattern with optional parts: in a
-    # combined pattern the whole number and the numerator can both claim the
-    # same digits, which backtracks quadratically on long digit runs.
-    m = _WHOLE_RE.fullmatch(s)
-    if m:
-        return total + float(s)
-    m = _MIXED_RE.fullmatch(s)
-    if m:
-        whole, num, den = float(m.group(1)), int(m.group(2)), int(m.group(3))
-    else:
-        m = _FRACTION_RE.fullmatch(s)
+    # Parsed with string operations rather than a regex: the grammar is tiny,
+    # and a pattern with optional whole/fraction parts backtracks
+    # quadratically on long runs of digits.
+    if "/" not in s:
+        value = _decimal(s)
+        return math.nan if value is None else total + value
+    head, _, den_text = s.partition("/")
+    head, den_text = head.strip(), den_text.strip()
+    if not _digits(den_text):
+        return math.nan
+    parts = head.split()
+    if len(parts) == 2:
+        whole = _decimal(parts[0])
+        num_text = parts[1]
+    elif len(parts) == 1:
+        whole = 0.0
+        num_text = parts[0]
         # "11/2" is ambiguous (1 1/2 or 11/2?), as is any numerator of two or
         # more digits written without a space before it.
-        if not m or len(m.group(1)) > 1:
+        if len(num_text) > 1:
             return math.nan
-        whole, num, den = 0.0, int(m.group(1)), int(m.group(2))
+    else:
+        return math.nan
+    if whole is None or not _digits(num_text):
+        return math.nan
+    num, den = int(num_text), int(den_text)
     if den == 0:
         return math.nan
     return total + whole + num / den
