@@ -4,6 +4,7 @@ The first sections mirror MenuPlanner's packages/shared/tests/ingredients.test.t
 case for case, so both implementations combine shopping lists identically.
 """
 import math
+import time
 
 import pytest
 
@@ -154,6 +155,22 @@ class TestParseQty:
         assert math.isnan(parse_qty("a few"))
         assert math.isnan(parse_qty("1/0"))
         assert math.isnan(parse_qty("11/2"))
+
+    def test_mixed_and_spaced_forms(self):
+        assert parse_qty("2 3/4") == 2.75
+        assert parse_qty("1 / 2") == 0.5
+        assert parse_qty("3 ½") == 3.5
+        assert math.isnan(parse_qty("1 1/0"))
+
+    def test_long_digit_runs_are_linear(self):
+        # A single pattern with optional whole/fraction parts backtracked
+        # quadratically here (CodeQL py/polynomial-redos).
+        start = time.perf_counter()
+        for tail in ("x", "/", " 1/x", "/2/"):
+            assert math.isnan(parse_qty("9" * 50_000 + tail))
+            parse_ingredient_line("9" * 50_000 + tail)
+            assert parse_quantity_text("9" * 50_000 + " x/") is None
+        assert time.perf_counter() - start < 1
 
 
 # ---------------------------------------------------------------------------

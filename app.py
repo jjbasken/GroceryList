@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import anthropic
 import bcrypt
@@ -1676,11 +1676,28 @@ def _resolve_safe_ip(hostname):
         return None
     ip = infos[0][4][0]
     addr = ipaddress.ip_address(ip)
+    # Judge an IPv4-mapped IPv6 address (::ffff:127.0.0.1) by the IPv4
+    # address it carries; older Pythons don't do this inside is_global.
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
     # is_global also rejects shared address space such as 100.64.0.0/10,
     # which may expose carrier-grade NAT or overlay-network services.
     if not addr.is_global or addr.is_multicast or addr.is_reserved:
         return None
     return ip
+
+
+def _pinned_url(parts, ip):
+    """The URL actually requested: the vetted IP in place of the hostname.
+
+    Requesting the address itself, rather than handing the user's URL to the
+    HTTP client, means the destination is the checked IP by construction.
+    The real hostname still goes in the Host header and is used for TLS
+    (SNI and certificate checks) by _PinnedHostAdapter.
+    """
+    host = f"[{ip}]" if ":" in ip else ip
+    netloc = host if parts.port is None else f"{host}:{parts.port}"
+    return urlunparse((parts.scheme, netloc, parts.path or "/", parts.params, parts.query, ""))
 
 
 def _is_safe_url(url):
@@ -1756,18 +1773,21 @@ def _fetch_recipe_page(url):
             raise ValueError("blocked_url")
 
         session = requests.Session()
+        # No proxy, .netrc or CA-bundle settings from the environment: the
+        # request must go straight to the pinned address.
+        session.trust_env = False
         adapter = _PinnedHostAdapter(safe_ip, parts.hostname)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         try:
             resp = session.get(
-                url,
+                _pinned_url(parts, safe_ip),
                 timeout=_RECIPE_IMPORT_TIMEOUT,
                 stream=True,
                 allow_redirects=False,
-                # The connection is pinned to safe_ip (see _PinnedHostAdapter), which
-                # would otherwise become the default Host header -- send the real
-                # hostname explicitly so name-based virtual hosting still works.
+                # The URL names safe_ip, which would otherwise become the Host
+                # header -- send the real hostname so name-based virtual hosting
+                # still works.
                 headers={"User-Agent": "GroceryListRecipeImport/1.0", "Host": parts.hostname},
             )
             try:

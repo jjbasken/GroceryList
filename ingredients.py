@@ -225,6 +225,11 @@ def scale_qty(qty, recipe_servings, servings):
     return qty * servings / recipe_servings
 
 
+_WHOLE_RE = re.compile(r"\d+(?:\.\d+)?")
+_FRACTION_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+_MIXED_RE = re.compile(r"(\d+(?:\.\d+)?)\s+(\d+)\s*/\s*(\d+)")
+
+
 def parse_qty(text):
     """Parses what people type into a quantity box: "2", "1.5", "1/2", "1 1/2",
     "1½", "½". Returns None for blank input and NaN for anything unparseable.
@@ -238,18 +243,25 @@ def parse_qty(text):
         s = s[:-1].strip()
         if not s:
             return total
-    m = re.match(r"^(\d+(?:\.\d+)?)?(?:\s*(\d+)\s*/\s*(\d+))?$", s)
-    if not m or (not m.group(1) and not m.group(2)):
-        return math.nan
-    if m.group(1) and m.group(2) and not re.search(r"\s", s):
-        return math.nan  # "11/2" is ambiguous
-    if m.group(1):
-        total += float(m.group(1))
-    if m.group(2):
-        if int(m.group(3)) == 0:
+    # Three separate shapes rather than one pattern with optional parts: in a
+    # combined pattern the whole number and the numerator can both claim the
+    # same digits, which backtracks quadratically on long digit runs.
+    m = _WHOLE_RE.fullmatch(s)
+    if m:
+        return total + float(s)
+    m = _MIXED_RE.fullmatch(s)
+    if m:
+        whole, num, den = float(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _FRACTION_RE.fullmatch(s)
+        # "11/2" is ambiguous (1 1/2 or 11/2?), as is any numerator of two or
+        # more digits written without a space before it.
+        if not m or len(m.group(1)) > 1:
             return math.nan
-        total += int(m.group(2)) / int(m.group(3))
-    return total
+        whole, num, den = 0.0, int(m.group(1)), int(m.group(2))
+    if den == 0:
+        return math.nan
+    return total + whole + num / den
 
 
 # A leading amount: "1 1/2", "1/2", "1.5", "1½", "1 ½", "½".

@@ -2086,6 +2086,26 @@ def _fake_getaddrinfo(host, *args, **kwargs):
 
 
 class TestRecipeUrlImport:
+    def test_request_goes_to_the_vetted_ip_with_real_host(self):
+        import app as app_module
+        page = _FakeResponse(
+            status_code=200,
+            headers={"Content-Type": "text/html"},
+            chunks=[b"<html>ok</html>"],
+        )
+        with patch("app.socket.getaddrinfo", side_effect=_fake_getaddrinfo), \
+             patch("app.requests.Session.get", autospec=True, return_value=page) as mock_get:
+            app_module._fetch_recipe_page("https://Example.com/recipes/1?x=2#top")
+        session, url = mock_get.call_args.args
+        assert url == "https://93.184.216.34/recipes/1?x=2"
+        assert mock_get.call_args.kwargs["headers"]["Host"] == "example.com"
+        assert session.trust_env is False
+
+    def test_ipv4_mapped_loopback_rejected(self):
+        import app as app_module
+        with patch("app.socket.getaddrinfo", return_value=[(10, 1, 6, "", ("::ffff:127.0.0.1", 0, 0, 0))]):
+            assert app_module._resolve_safe_ip("sneaky.example") is None
+
     def test_requires_auth(self, client):
         rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/recipe"})
         assert rv.status_code == 401
