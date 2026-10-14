@@ -119,6 +119,20 @@ test('offline reads work only for the selected account; logout removes HTML, dat
     assert.equal((await w.request('/api/items', asAlice)).status, 503);
 });
 
+test('meal planning and recipe pages and data are never stored for offline use', async () => {
+    const w = worker();
+    await w.request('/');
+    for (const url of ['/meals', '/recipes', '/recipes/1', '/api/meals?start=2026-10-12&days=7',
+        '/api/recipes', '/api/recipes/1']) {
+        // The worker leaves these to the network entirely.
+        assert.equal(w.request(url, asAlice), undefined, url);
+    }
+    const cache = await w.caches.open('grocery-private-v2-alice');
+    for (const url of ['/meals', '/api/meals?start=2026-10-12&days=7', '/api/recipes']) {
+        assert.equal(await cache.match(origin + url), undefined, url);
+    }
+});
+
 test('a request started before logout cannot repopulate private storage', async () => {
     const w = worker();
     await w.request('/');

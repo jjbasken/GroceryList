@@ -53,7 +53,7 @@ def _clean_db(app):
     with app.app_context():
         db = get_db()
         for table in (
-            "audit_log", "item_name_history", "recipe_ingredients", "recipes",
+            "audit_log", "item_name_history", "planned_meals", "recipe_ingredients", "recipes",
             "items", "lists", "users",
         ):
             db.execute(f"DELETE FROM {table}")  # noqa: S608
@@ -112,21 +112,36 @@ def make_item(list_id, name="Milk", section="now", is_bought=0, added_by=None):
         return cur.lastrowid
 
 
-def make_recipe(name="Pancakes", notes=None, steps=None, ingredients=("Flour", "Eggs"), created_by=None):
+def make_recipe(name="Pancakes", notes=None, steps=None, ingredients=("Flour", "Eggs"),
+                created_by=None, servings=4):
+    """Ingredients may be names or (name, qty, unit) tuples."""
     with _flask_app.app_context():
         db = get_db()
         steps_text = "\n".join(steps) if steps else None
         cur = db.execute(
-            "INSERT INTO recipes (name, notes, steps, created_by) VALUES (?, ?, ?, ?)",
-            (name, notes, steps_text, created_by),
+            "INSERT INTO recipes (name, notes, steps, servings, created_by) VALUES (?, ?, ?, ?, ?)",
+            (name, notes, steps_text, servings, created_by),
         )
         recipe_id = cur.lastrowid
+        rows = [(i, None, "") if isinstance(i, str) else i for i in ingredients]
         db.executemany(
-            "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
-            [(recipe_id, text) for text in ingredients],
+            "INSERT INTO recipe_ingredients (recipe_id, name, qty, unit, sort) VALUES (?, ?, ?, ?, ?)",
+            [(recipe_id, n, q, u, sort) for sort, (n, q, u) in enumerate(rows)],
         )
         db.commit()
         return recipe_id
+
+
+def make_meal(date, title="Tacos", kind="cook", recipe_id=None, servings=None, leftover_of=None):
+    with _flask_app.app_context():
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO planned_meals (date, kind, recipe_id, title, servings, leftover_of)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (date, kind, recipe_id, title, servings, leftover_of),
+        )
+        db.commit()
+        return cur.lastrowid
 
 
 def do_login(client, username="alice", password="pass1234"):

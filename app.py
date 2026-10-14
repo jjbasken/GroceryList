@@ -3,13 +3,14 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import queue
 import re
 import socket
 import sqlite3
 import threading
 import time
-from datetime import timedelta
+from datetime import date, timedelta
 from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
@@ -37,6 +38,7 @@ from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import config
+import ingredients as ingr
 
 app = Flask(__name__)
 app.config.from_object(config)  # SECRET_KEY, WTF_CSRF_TIME_LIMIT
@@ -224,28 +226,9 @@ def upgrade_db():
         """)
         db.execute("INSERT OR IGNORE INTO item_name_history (name) SELECT DISTINCT name FROM items")
 
-    # --- Recipes tables ---
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if 'recipes' not in tables:
-        db.execute("""
-            CREATE TABLE recipes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                notes TEXT,
-                steps TEXT,
-                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-    if 'recipe_ingredients' not in tables:
-        db.execute("""
-            CREATE TABLE recipe_ingredients (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
-                text TEXT NOT NULL
-            )
-        """)
+    # Recipe and meal-planning tables (recipes, recipe_ingredients,
+    # planned_meals) are new and come only from schema.sql, which init_db runs
+    # just before this; there is no older shape of them to migrate.
 
     # --- Audit log table ---
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -511,11 +494,20 @@ def index():
 
 
 @app.route("/recipes")
+@app.route("/recipes/<int:recipe_id>")
 @login_required
-def recipes():
+def recipes(recipe_id=None):
     return render_template("recipes.html", username=session["username"],
                            is_admin=(session.get("role") == "admin"),
-                           import_url_enabled=bool(config.ANTHROPIC_API_KEY))
+                           import_url_enabled=bool(config.ANTHROPIC_API_KEY),
+                           recipe_id=recipe_id)
+
+
+@app.route("/meals")
+@login_required
+def meals():
+    return render_template("meals.html", username=session["username"],
+                           is_admin=(session.get("role") == "admin"))
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +905,15 @@ def external_add_items():
 # Recipes and their edits are open to any household member, same as items and
 # lists (see the note above add_item). Deletion is restricted to the recipe's
 # creator or an admin, same as delete_list.
+#
+# Ingredients are stored structured (name / qty / unit / note) so that meals
+# can be scaled to a serving count and combined across recipes when they are
+# added to a grocery list. See ingredients.py for the unit handling.
+
+MAX_RECIPE_INGREDIENTS = 100
+MAX_INGREDIENT_QTY = 100_000
+MAX_SERVINGS = 100
+
 
 def may_delete_recipe(created_by, is_admin):
     return is_admin or (created_by is not None and created_by == session.get("user_id"))
@@ -940,27 +941,159 @@ def _prepare_lines(raw, max_lines, max_len):
     return cleaned, None
 
 
+def _valid_servings(value, allow_none=False):
+    if value is None and allow_none:
+        return True
+    return type(value) is int and 1 <= value <= MAX_SERVINGS
+
+
+def _validate_ingredient(raw):
+    """Normalize one ingredient: a free-text line or a {name, qty, unit, note} object."""
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None, None
+        if len(raw) > 300:
+            return None, "Ingredient line too long (max 300 chars)"
+        raw = ingr.parse_ingredient_line(raw)
+    if not isinstance(raw, dict):
+        return None, "Invalid ingredient"
+    for key in ("name", "unit", "note"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            return None, f"Ingredient {key} must be a string"
+    name = (raw.get("name") or "").strip()
+    unit = (raw.get("unit") or "").strip()
+    note = (raw.get("note") or "").strip()
+    qty = raw.get("qty")
+    if isinstance(qty, str):
+        # Amounts typed into the editor arrive as text: "1 1/2", "½".
+        qty = ingr.parse_qty(qty)
+    if isinstance(qty, bool) or (qty is not None and not isinstance(qty, (int, float))):
+        return None, "Ingredient amount must be a number"
+    if qty is not None and (math.isnan(qty) or not 0 < qty <= MAX_INGREDIENT_QTY):
+        return None, f"Couldn't read the amount for '{name or 'an ingredient'}'"
+    if not name:
+        # A row with only an amount is a half-filled editor row, not an error.
+        return None, None
+    if len(name) > 200:
+        return None, "Ingredient name too long"
+    if len(unit) > 40:
+        return None, "Ingredient unit too long"
+    if len(note) > 500:
+        return None, "Ingredient note too long"
+    return {"name": name, "qty": float(qty) if qty is not None else None, "unit": unit, "note": note}, None
+
+
+def _validate_recipe_payload(data):
+    """Shared validation for create/update. Returns (fields_dict, error_response_or_None)."""
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "Invalid format"}), 400)
+    name = (data.get("name") or "").strip() if isinstance(data.get("name"), (str, type(None))) else ""
+    notes = data.get("notes")
+    notes = notes.strip() or None if isinstance(notes, str) else None
+
+    if not name:
+        return None, (jsonify({"error": "Name is required"}), 400)
+    if len(name) > 200:
+        return None, (jsonify({"error": "Name too long"}), 400)
+    if notes and len(notes) > 2000:
+        return None, (jsonify({"error": "Notes too long"}), 400)
+
+    servings = data.get("servings", 4)
+    if not _valid_servings(servings):
+        return None, (jsonify({"error": f"Servings must be a whole number from 1 to {MAX_SERVINGS}"}), 400)
+
+    source_url = data.get("source_url")
+    source_url = source_url.strip() or None if isinstance(source_url, str) else None
+    if source_url:
+        parts = urlparse(source_url)
+        if len(source_url) > 2048 or parts.scheme not in ("http", "https") or not parts.netloc:
+            return None, (jsonify({"error": "Source link must be an http(s) URL"}), 400)
+
+    raw_ingredients = data.get("ingredients")
+    if not isinstance(raw_ingredients, list):
+        return None, (jsonify({"error": "Invalid format"}), 400)
+    if len(raw_ingredients) > MAX_RECIPE_INGREDIENTS:
+        return None, (jsonify({"error": f"Too many ingredients (max {MAX_RECIPE_INGREDIENTS})"}), 400)
+    ingredients = []
+    for raw in raw_ingredients:
+        ingredient, err = _validate_ingredient(raw)
+        if err:
+            return None, (jsonify({"error": err}), 400)
+        if ingredient:
+            ingredients.append(ingredient)
+    if not ingredients:
+        return None, (jsonify({"error": "At least one ingredient is required"}), 400)
+
+    steps, err = _prepare_lines(data.get("steps"), max_lines=100, max_len=300)
+    if err:
+        return None, (jsonify({"error": err}), 400)
+    steps_text = "\n".join(steps) or None
+    if steps_text and len(steps_text) > 4000:
+        return None, (jsonify({"error": "Steps too long"}), 400)
+
+    return {
+        "name": name, "notes": notes, "steps_text": steps_text, "servings": servings,
+        "source_url": source_url, "ingredients": ingredients,
+    }, None
+
+
+def _write_ingredients(db, recipe_id, ingredients):
+    db.executemany(
+        "INSERT INTO recipe_ingredients (recipe_id, name, qty, unit, note, sort) VALUES (?, ?, ?, ?, ?, ?)",
+        [(recipe_id, i["name"], i["qty"], i["unit"], i["note"], sort) for sort, i in enumerate(ingredients)],
+    )
+
+
+def _recipe_ingredients(db, recipe_ids):
+    # json_each() binds the whole id list as one parameter, so the SQL text
+    # never has to be assembled from the input.
+    return db.execute(
+        "SELECT id, recipe_id, name, qty, unit, note FROM recipe_ingredients "
+        "WHERE recipe_id IN (SELECT value FROM json_each(?)) ORDER BY recipe_id, sort, id",
+        (json.dumps(list(recipe_ids)),),
+    ).fetchall()
+
+
 @app.route("/api/recipes")
 @login_required
 def get_recipes():
+    query = (request.args.get("q") or "").strip()[:100]
     db = get_db()
-    rows = db.execute(
+    sql = (
         "SELECT recipes.*, "
         "(SELECT COUNT(*) FROM recipe_ingredients WHERE recipe_id = recipes.id) AS ingredient_count "
-        "FROM recipes ORDER BY name COLLATE NOCASE"
-    ).fetchall()
+        "FROM recipes "
+    )
+    params = ()
+    if query:
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        sql += "WHERE name LIKE ? ESCAPE '\\' COLLATE NOCASE OR notes LIKE ? ESCAPE '\\' COLLATE NOCASE "
+        params = (f"%{escaped}%", f"%{escaped}%")
+    rows = db.execute(sql + "ORDER BY name COLLATE NOCASE", params).fetchall()
     is_admin = current_user_is_admin()
     return jsonify([
         {
             "id": r["id"],
             "name": r["name"],
             "notes": r["notes"],
+            "servings": r["servings"],
             "ingredient_count": r["ingredient_count"],
             "created_by": r["created_by"],
             "can_delete": may_delete_recipe(r["created_by"], is_admin),
         }
         for r in rows
     ])
+
+
+def _editable_qty(qty):
+    """The amount as the editor should show it: "1½" when that reads back
+    exactly, otherwise plain decimals so saving never changes the amount."""
+    if qty is None:
+        return ""
+    text = ingr.format_qty(qty)
+    if abs((ingr.parse_qty(text) or 0) - qty) < 1e-9:
+        return text
+    return f"{qty:.3f}".rstrip("0").rstrip(".")
 
 
 @app.route("/api/recipes/<int:recipe_id>")
@@ -975,62 +1108,58 @@ def get_recipe(recipe_id):
     ).fetchone()
     if recipe is None:
         return jsonify({"error": "Recipe not found"}), 404
-    ingredients = db.execute(
-        "SELECT id, text FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
-        (recipe_id,),
-    ).fetchall()
+    servings = request.args.get("servings", type=int)
+    if not _valid_servings(servings):
+        servings = recipe["servings"]
+    ingredients = []
+    for row in _recipe_ingredients(db, [recipe_id]):
+        scaled = ingr.scale_qty(row["qty"], recipe["servings"], servings)
+        ingredients.append({
+            "id": row["id"], "name": row["name"], "qty": row["qty"], "unit": row["unit"], "note": row["note"],
+            "qty_text": _editable_qty(row["qty"]),
+            # Scaled and formatted server-side so the page has one source of truth
+            # for kitchen fractions ("1½ cups").
+            "amount": ingr.format_quantity(scaled, row["unit"]) if scaled is not None else "",
+        })
     data = dict(recipe)
-    data["ingredients"] = [dict(i) for i in ingredients]
+    data["ingredients"] = ingredients
+    data["scaled_servings"] = servings
     data["can_delete"] = may_delete_recipe(recipe["created_by"], current_user_is_admin())
     return jsonify(data)
 
 
-def _validate_recipe_payload(data):
-    """Shared validation for create/update. Returns (fields_dict, error_response_or_None)."""
-    name = (data.get("name") or "").strip()
-    notes = (data.get("notes") or "").strip() or None
-
-    if not name:
-        return None, (jsonify({"error": "Name is required"}), 400)
-    if len(name) > 200:
-        return None, (jsonify({"error": "Name too long"}), 400)
-    if notes and len(notes) > 2000:
-        return None, (jsonify({"error": "Notes too long"}), 400)
-
-    ingredients, err = _prepare_lines(data.get("ingredients"), max_lines=200, max_len=200)
+@app.route("/api/recipes/parse-ingredients", methods=["POST"])
+@login_required
+def parse_ingredients():
+    """Split pasted ingredient lines into editor fields. Never writes."""
+    data = request.get_json(silent=True)
+    lines = data.get("lines") if isinstance(data, dict) else None
+    lines, err = _prepare_lines(lines, max_lines=MAX_RECIPE_INGREDIENTS, max_len=300)
     if err:
-        return None, (jsonify({"error": err}), 400)
-    if not ingredients:
-        return None, (jsonify({"error": "At least one ingredient is required"}), 400)
-
-    steps, err = _prepare_lines(data.get("steps"), max_lines=100, max_len=300)
-    if err:
-        return None, (jsonify({"error": err}), 400)
-    steps_text = "\n".join(steps) or None
-    if steps_text and len(steps_text) > 4000:
-        return None, (jsonify({"error": "Steps too long"}), 400)
-
-    return {"name": name, "notes": notes, "steps_text": steps_text, "ingredients": ingredients}, None
+        return jsonify({"error": err}), 400
+    parsed = []
+    for line in lines:
+        item = ingr.parse_ingredient_line(line)
+        parsed.append({**item, "qty_text": ingr.format_qty(item["qty"]) if item["qty"] is not None else ""})
+    return jsonify({"ingredients": parsed})
 
 
 @app.route("/api/recipes", methods=["POST"])
 @login_required
 def create_recipe():
-    fields, error = _validate_recipe_payload(request.get_json() or {})
+    fields, error = _validate_recipe_payload(request.get_json(silent=True))
     if error:
         return error
 
     db = get_db()
-    cur = db.execute(
-        "INSERT INTO recipes (name, notes, steps, created_by) VALUES (?, ?, ?, ?)",
-        (fields["name"], fields["notes"], fields["steps_text"], session["user_id"]),
-    )
-    recipe_id = cur.lastrowid
-    db.executemany(
-        "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
-        [(recipe_id, text) for text in fields["ingredients"]],
-    )
-    db.commit()
+    with db:
+        cur = db.execute(
+            "INSERT INTO recipes (name, notes, steps, servings, source_url, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (fields["name"], fields["notes"], fields["steps_text"], fields["servings"],
+             fields["source_url"], session["user_id"]),
+        )
+        recipe_id = cur.lastrowid
+        _write_ingredients(db, recipe_id, fields["ingredients"])
     broadcast("update")
     return jsonify({"id": recipe_id}), 201
 
@@ -1042,20 +1171,19 @@ def update_recipe(recipe_id):
     if db.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
         return jsonify({"error": "Recipe not found"}), 404
 
-    fields, error = _validate_recipe_payload(request.get_json() or {})
+    fields, error = _validate_recipe_payload(request.get_json(silent=True))
     if error:
         return error
 
-    db.execute(
-        "UPDATE recipes SET name = ?, notes = ?, steps = ?, updated_at = datetime('now') WHERE id = ?",
-        (fields["name"], fields["notes"], fields["steps_text"], recipe_id),
-    )
-    db.execute("DELETE FROM recipe_ingredients WHERE recipe_id = ?", (recipe_id,))
-    db.executemany(
-        "INSERT INTO recipe_ingredients (recipe_id, text) VALUES (?, ?)",
-        [(recipe_id, text) for text in fields["ingredients"]],
-    )
-    db.commit()
+    with db:
+        db.execute(
+            "UPDATE recipes SET name = ?, notes = ?, steps = ?, servings = ?, source_url = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (fields["name"], fields["notes"], fields["steps_text"], fields["servings"],
+             fields["source_url"], recipe_id),
+        )
+        db.execute("DELETE FROM recipe_ingredients WHERE recipe_id = ?", (recipe_id,))
+        _write_ingredients(db, recipe_id, fields["ingredients"])
     broadcast("update")
     return jsonify({"ok": True})
 
@@ -1071,6 +1199,7 @@ def delete_recipe(recipe_id):
         return jsonify({"error": "Recipe not found"}), 404
     if not may_delete_recipe(recipe["created_by"], current_user_is_admin()):
         return jsonify({"error": "Only an admin or the recipe's creator can delete it"}), 403
+    # Planned meals keep their title; recipe_id is cleared by ON DELETE SET NULL.
     db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
     log_audit("recipe.delete", f"Deleted recipe '{recipe['name']}'")
     db.commit()
@@ -1078,55 +1207,408 @@ def delete_recipe(recipe_id):
     return jsonify({"ok": True})
 
 
-@app.route("/api/recipes/<int:recipe_id>/add-to-list", methods=["POST"])
+# ---------------------------------------------------------------------------
+# Meal planning API
+# ---------------------------------------------------------------------------
+#
+# A planned meal sits on a plain YYYY-MM-DD date in the household's local
+# calendar. The server never works out "today" -- the browser sends the dates
+# it means -- so a meal planned for Tuesday stays on Tuesday whatever time
+# zone the server runs in. Kinds follow MenuPlanner: a "cook" night uses a
+# recipe (and is the only kind whose ingredients go to the list), "leftovers"
+# eats up an earlier cook night, and "flexible" is a loose, easy night.
+
+MEAL_KINDS = ("cook", "leftovers", "flexible")
+MAX_MEAL_RANGE_DAYS = 42
+
+
+def _parse_iso_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _fetch_meals(db, ids=None, start=None, end=None):
+    """Meals with their recipe and leftovers details, by id list and/or date range."""
+    return db.execute(
+        "SELECT m.*, r.name AS recipe_name, r.servings AS recipe_servings, "
+        "l.title AS leftover_of_title, l.date AS leftover_of_date, lists.name AS added_to_list_name "
+        "FROM planned_meals m "
+        "LEFT JOIN recipes r ON m.recipe_id = r.id "
+        "LEFT JOIN planned_meals l ON m.leftover_of = l.id "
+        "LEFT JOIN lists ON m.added_to_list_id = lists.id "
+        "WHERE (?1 IS NULL OR m.id IN (SELECT value FROM json_each(?1))) "
+        "AND (?2 IS NULL OR m.date >= ?2) AND (?3 IS NULL OR m.date <= ?3) "
+        "ORDER BY m.date, m.sort, m.id",
+        (json.dumps(ids) if ids is not None else None, start, end),
+    ).fetchall()
+
+
+def _validate_meal(db, data):
+    """Normalize a meal payload. Returns (fields, error_message)."""
+    if not isinstance(data, dict):
+        return None, "Invalid format"
+    meal_date = _parse_iso_date(data.get("date"))
+    if meal_date is None:
+        return None, "Date must be YYYY-MM-DD"
+    kind = data.get("kind", "cook")
+    if kind not in MEAL_KINDS:
+        return None, "Kind must be cook, leftovers or flexible"
+    for key in ("title", "notes"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            return None, f"{key} must be a string"
+    title = (data.get("title") or "").strip()
+    notes = (data.get("notes") or "").strip() or None
+    if len(title) > 200:
+        return None, "Title too long"
+    if notes and len(notes) > 500:
+        return None, "Notes too long"
+    servings = data.get("servings")
+    if not _valid_servings(servings, allow_none=True):
+        return None, f"Servings must be a whole number from 1 to {MAX_SERVINGS}"
+
+    recipe_id = data.get("recipe_id")
+    recipe = None
+    if recipe_id is not None:
+        if type(recipe_id) is not int:
+            return None, "Invalid recipe"
+        recipe = db.execute("SELECT id, name FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+        if recipe is None:
+            return None, "Recipe not found"
+
+    leftover_of = data.get("leftover_of")
+    leftover_meal = None
+    if kind != "leftovers":
+        leftover_of = None
+    elif leftover_of is not None:
+        if type(leftover_of) is not int:
+            return None, "Invalid cook night"
+        leftover_meal = db.execute(
+            "SELECT id, title, date FROM planned_meals WHERE id = ? AND kind = 'cook'", (leftover_of,)
+        ).fetchone()
+        if leftover_meal is None:
+            return None, "Leftovers must point at a cook night"
+        if leftover_meal["date"] > meal_date.isoformat():
+            return None, "Leftovers can't come before the meal they're from"
+
+    if not title:
+        if recipe is not None:
+            title = recipe["name"]
+        elif leftover_meal is not None:
+            title = f"Leftover {leftover_meal['title']}"[:200]
+        else:
+            return None, "Pick a recipe or type what's for dinner"
+    return {
+        "date": meal_date.isoformat(), "kind": kind, "recipe_id": recipe_id, "title": title,
+        "leftover_of": leftover_of, "servings": servings, "notes": notes,
+    }, None
+
+
+@app.route("/api/meals")
 @login_required
-def add_recipe_to_list(recipe_id):
-    """Atomically add selected recipe ingredients to a grocery list."""
-    data = request.get_json() or {}
+def get_meals():
+    start = _parse_iso_date(request.args.get("start"))
+    if start is None:
+        return jsonify({"error": "start must be YYYY-MM-DD"}), 400
+    days = request.args.get("days", default=7, type=int)
+    if not 1 <= days <= MAX_MEAL_RANGE_DAYS:
+        return jsonify({"error": f"days must be 1-{MAX_MEAL_RANGE_DAYS}"}), 400
+    end = start + timedelta(days=days - 1)
+    rows = _fetch_meals(get_db(), start=start.isoformat(), end=end.isoformat())
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/meals", methods=["POST"])
+@login_required
+def create_meal():
+    db = get_db()
+    fields, error = _validate_meal(db, request.get_json(silent=True))
+    if error:
+        return jsonify({"error": error}), 400
+    cur = db.execute(
+        "INSERT INTO planned_meals (date, kind, recipe_id, title, leftover_of, servings, notes, sort, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, "
+        "(SELECT COALESCE(MAX(sort), -1) + 1 FROM planned_meals WHERE date = ?), ?)",
+        (fields["date"], fields["kind"], fields["recipe_id"], fields["title"], fields["leftover_of"],
+         fields["servings"], fields["notes"], fields["date"], session["user_id"]),
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify(dict(_fetch_meals(db, ids=[cur.lastrowid])[0])), 201
+
+
+@app.route("/api/meals/<int:meal_id>", methods=["PUT"])
+@login_required
+def update_meal(meal_id):
+    db = get_db()
+    existing = db.execute("SELECT id, date FROM planned_meals WHERE id = ?", (meal_id,)).fetchone()
+    if existing is None:
+        return jsonify({"error": "Meal not found"}), 404
+    fields, error = _validate_meal(db, request.get_json(silent=True))
+    if error:
+        return jsonify({"error": error}), 400
+    if fields["leftover_of"] == meal_id:
+        return jsonify({"error": "Leftovers must point at a cook night"}), 400
+    # Updated in place (not deleted and re-added) so leftovers that point at
+    # this cook night keep pointing at it.
+    db.execute(
+        "UPDATE planned_meals SET date = ?, kind = ?, recipe_id = ?, title = ?, leftover_of = ?, "
+        "servings = ?, notes = ?, updated_at = datetime('now'), "
+        "sort = CASE WHEN date = ? THEN sort "
+        "ELSE (SELECT COALESCE(MAX(sort), -1) + 1 FROM planned_meals WHERE date = ?) END "
+        "WHERE id = ?",
+        (fields["date"], fields["kind"], fields["recipe_id"], fields["title"], fields["leftover_of"],
+         fields["servings"], fields["notes"], fields["date"], fields["date"], meal_id),
+    )
+    if fields["kind"] != "cook":
+        db.execute("UPDATE planned_meals SET leftover_of = NULL WHERE leftover_of = ?", (meal_id,))
+    db.commit()
+    broadcast("update")
+    return jsonify(dict(_fetch_meals(db, ids=[meal_id])[0]))
+
+
+@app.route("/api/meals/<int:meal_id>", methods=["DELETE"])
+@login_required
+def delete_meal(meal_id):
+    db = get_db()
+    if db.execute("SELECT id FROM planned_meals WHERE id = ?", (meal_id,)).fetchone() is None:
+        return jsonify({"error": "Meal not found"}), 404
+    db.execute("DELETE FROM planned_meals WHERE id = ?", (meal_id,))
+    db.commit()
+    broadcast("update")
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Adding recipe ingredients to a grocery list
+# ---------------------------------------------------------------------------
+#
+# Two steps so nothing lands on the list unreviewed: preview combines and
+# scales the ingredients and compares them with what is already on the list;
+# apply writes exactly the lines the user confirmed, in one transaction.
+
+MAX_APPLY_LINES = 200
+
+
+def _sources_note(sources):
+    return f"for {', '.join(sources)}"[:500] if sources else ""
+
+
+def _list_items_by_key(db, list_id):
+    """Map ingredient key -> the list item a new line would merge with.
+
+    An unbought item wins over a bought one: it is still to be purchased, so
+    combining with it is the right default. A bought-only match is reported so
+    the review can ask whether it's still needed.
+    """
+    matches = {}
+    rows = db.execute(
+        "SELECT id, name, quantity, notes, is_bought FROM items WHERE list_id = ? ORDER BY is_bought, id",
+        (list_id,),
+    ).fetchall()
+    for row in rows:
+        matches.setdefault(ingr.ingredient_key(row["name"]), row)
+    return matches
+
+
+def _merge_amount(existing_quantity, existing_notes, quantity, note):
+    """What a combined item's quantity and notes become.
+
+    Amounts are summed only when both sides read cleanly ("1 lb" + "2 lb");
+    otherwise the extra amount goes in the notes, the same rule the external
+    API uses, so no typed text is ever lost.
+    """
+    new_quantity = existing_quantity
+    extra = ""
+    if quantity:
+        parsed = ingr.parse_quantity_text(quantity)
+        combined = ingr.combine_quantity_text(existing_quantity, parsed) if parsed else None
+        if combined and len(combined) <= 50:
+            new_quantity = combined
+        else:
+            extra = f"+{quantity}"
+    addition = " ".join(p for p in (extra, note) if p)
+    notes = existing_notes or ""
+    if addition and addition not in notes:
+        notes = f"{notes}; {addition}" if notes else addition
+    return new_quantity, (notes[:500] or None)
+
+
+def _preview_lines(db, list_id, ingredient_lines):
+    by_key = _list_items_by_key(db, list_id)
+    lines = []
+    for agg in ingr.aggregate_ingredients(ingredient_lines):
+        existing = by_key.get(agg["key"])
+        note = _sources_note(agg["sources"])
+        if existing is None:
+            status, action = "new", "add"
+        elif existing["is_bought"]:
+            # Probably bought for this very plan; ask rather than add it again.
+            status, action = "bought", "skip"
+        else:
+            status, action = "on_list", "combine"
+        line = {
+            "key": agg["key"],
+            "name": agg["name"],
+            "quantity": agg["quantity_text"][:50] or None,
+            "notes": note or None,
+            "sources": agg["sources"],
+            "unquantified": not agg["quantities"],
+            "status": status,
+            "action": action,
+            "existing_item": None,
+        }
+        if existing is not None:
+            line["existing_item"] = {
+                "id": existing["id"], "name": existing["name"], "quantity": existing["quantity"],
+                "notes": existing["notes"], "is_bought": bool(existing["is_bought"]),
+            }
+            if status == "on_list":
+                line["combined_quantity"], line["combined_notes"] = _merge_amount(
+                    existing["quantity"], existing["notes"], line["quantity"], note)
+        lines.append(line)
+    return lines
+
+
+def _int_list(value, max_len):
+    if (not isinstance(value, list) or len(value) > max_len
+            or any(type(v) is not int for v in value) or len(set(value)) != len(value)):
+        return None
+    return value
+
+
+@app.route("/api/shopping/preview", methods=["POST"])
+@login_required
+def shopping_preview():
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "Invalid format"}), 400
-
-    list_id = data.get("list_id")
-    section = data.get("section", "now")
-    ingredient_ids = data.get("ingredient_ids")
-    if type(list_id) is not int:
-        return jsonify({"error": "List is required"}), 400
-    if section not in ("now", "later"):
-        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
-    if (not isinstance(ingredient_ids, list) or not ingredient_ids or len(ingredient_ids) > 200
-            or any(type(value) is not int for value in ingredient_ids)
-            or len(set(ingredient_ids)) != len(ingredient_ids)):
-        return jsonify({"error": "Select at least one valid ingredient"}), 400
-
     db = get_db()
-    if db.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,)).fetchone() is None:
-        return jsonify({"error": "Recipe not found"}), 404
-    if db.execute("SELECT id FROM lists WHERE id = ?", (list_id,)).fetchone() is None:
+    list_id = data.get("list_id")
+    if type(list_id) is not int or db.execute("SELECT 1 FROM lists WHERE id = ?", (list_id,)).fetchone() is None:
         return jsonify({"error": "List not found"}), 404
 
-    placeholders = ",".join("?" for _ in ingredient_ids)
-    ingredients = db.execute(
-        f"SELECT id, text FROM recipe_ingredients "
-        f"WHERE recipe_id = ? AND id IN ({placeholders})",
-        (recipe_id, *ingredient_ids),
-    ).fetchall()
-    if len(ingredients) != len(ingredient_ids):
-        return jsonify({"error": "Invalid ingredient selection"}), 400
+    ingredient_lines = []
+    without_recipe = []
+    skipped = []
+    if data.get("recipe_id") is not None:
+        recipe_id = data["recipe_id"]
+        recipe = db.execute(
+            "SELECT id, name, servings FROM recipes WHERE id = ?", (recipe_id,)
+        ).fetchone() if type(recipe_id) is int else None
+        if recipe is None:
+            return jsonify({"error": "Recipe not found"}), 404
+        servings = data.get("servings")
+        if not _valid_servings(servings, allow_none=True):
+            return jsonify({"error": "Invalid servings"}), 400
+        for row in _recipe_ingredients(db, [recipe_id]):
+            ingredient_lines.append({
+                "name": row["name"], "unit": row["unit"], "source": recipe["name"],
+                "qty": ingr.scale_qty(row["qty"], recipe["servings"], servings),
+            })
+        meals = []
+    else:
+        meal_ids = _int_list(data.get("meal_ids"), MAX_MEAL_RANGE_DAYS * 4)
+        if not meal_ids:
+            return jsonify({"error": "Choose at least one meal"}), 400
+        meals = _fetch_meals(db, ids=meal_ids)
+        if len(meals) != len(meal_ids):
+            return jsonify({"error": "Meal not found"}), 404
+        recipe_ids = sorted({m["recipe_id"] for m in meals if m["kind"] == "cook" and m["recipe_id"]})
+        by_recipe = {}
+        for row in _recipe_ingredients(db, recipe_ids):
+            by_recipe.setdefault(row["recipe_id"], []).append(row)
+        for meal in meals:
+            if meal["kind"] != "cook":
+                skipped.append(meal["title"])
+                continue
+            if not meal["recipe_id"]:
+                without_recipe.append(meal["title"])
+                continue
+            for row in by_recipe.get(meal["recipe_id"], []):
+                ingredient_lines.append({
+                    "name": row["name"], "unit": row["unit"], "source": meal["title"],
+                    "qty": ingr.scale_qty(row["qty"], meal["recipe_servings"], meal["servings"]),
+                })
 
-    text_by_id = {row["id"]: row["text"] for row in ingredients}
-    texts = [text_by_id[ingredient_id] for ingredient_id in ingredient_ids]
+    return jsonify({
+        "lines": _preview_lines(db, list_id, ingredient_lines),
+        "meals_without_recipe": without_recipe,
+        "meals_skipped": skipped,
+        "already_added": [m["title"] for m in meals
+                          if m["added_to_list_at"] and m["kind"] == "cook" and m["recipe_id"]],
+    })
+
+
+@app.route("/api/shopping/apply", methods=["POST"])
+@login_required
+def shopping_apply():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid format"}), 400
+    db = get_db()
+    list_id = data.get("list_id")
+    if type(list_id) is not int or db.execute("SELECT 1 FROM lists WHERE id = ?", (list_id,)).fetchone() is None:
+        return jsonify({"error": "List not found"}), 404
+    section = data.get("section", "now")
+    if section not in ("now", "later"):
+        return jsonify({"error": "Section must be 'now' or 'later'"}), 400
+    meal_ids = _int_list(data.get("meal_ids", []), MAX_MEAL_RANGE_DAYS * 4)
+    if meal_ids is None:
+        return jsonify({"error": "Invalid meals"}), 400
+    if meal_ids and len(_fetch_meals(db, ids=meal_ids)) != len(meal_ids):
+        return jsonify({"error": "Meal not found"}), 404
+    lines = data.get("lines")
+    if not isinstance(lines, list) or len(lines) > MAX_APPLY_LINES:
+        return jsonify({"error": f"Send between 0 and {MAX_APPLY_LINES} lines"}), 400
+
+    to_add, to_combine = [], []
+    for i, line in enumerate(lines):
+        if not isinstance(line, dict):
+            return jsonify({"error": f"lines[{i}]: Invalid line"}), 400
+        action = line.get("action")
+        if action == "skip":
+            continue
+        fields, error = _validate_item({
+            "name": line.get("name"), "quantity": line.get("quantity"),
+            "notes": line.get("notes"), "section": section,
+        })
+        if error:
+            return jsonify({"error": f"lines[{i}]: {error}"}), 400
+        if action == "add":
+            to_add.append(fields)
+        elif action == "combine":
+            item_id = line.get("existing_item_id")
+            existing = db.execute(
+                "SELECT id, quantity, notes FROM items WHERE id = ? AND list_id = ?", (item_id, list_id)
+            ).fetchone() if type(item_id) is int else None
+            if existing is None:
+                return jsonify({"error": f"lines[{i}]: That item is no longer on the list"}), 400
+            to_combine.append((existing, fields))
+        else:
+            return jsonify({"error": f"lines[{i}]: Action must be add, combine or skip"}), 400
+
     with db:
-        db.executemany(
-            "INSERT INTO items (name, section, list_id, added_by) VALUES (?, ?, ?, ?)",
-            [(text, section, list_id, session["user_id"]) for text in texts],
+        for fields in to_add:
+            _insert_item(db, fields, list_id, session["user_id"])
+        for existing, fields in to_combine:
+            quantity, notes = _merge_amount(existing["quantity"], existing["notes"], fields["quantity"], fields["notes"])
+            db.execute(
+                "UPDATE items SET quantity = ?, notes = ?, updated_at = datetime('now') WHERE id = ?",
+                (quantity, notes, existing["id"]),
+            )
+        db.execute(
+            "UPDATE planned_meals SET added_to_list_id = ?, added_to_list_at = datetime('now') "
+            # Only cook nights with a recipe contributed ingredients.
+            "WHERE id IN (SELECT value FROM json_each(?)) AND kind = 'cook' AND recipe_id IS NOT NULL",
+            (list_id, json.dumps(meal_ids)),
         )
-        db.executemany(
-            "INSERT INTO item_name_history (name, last_used) VALUES (?, datetime('now')) "
-            "ON CONFLICT(name) DO UPDATE SET last_used = datetime('now')",
-            [(text,) for text in texts],
-        )
+        log_audit("meals.add_to_list", f"Added {len(to_add)}, combined {len(to_combine)} into list {list_id}")
     broadcast("update")
-    return jsonify({"added": len(texts)}), 201
+    return jsonify({"added": len(to_add), "combined": len(to_combine)}), 201
 
 
 # --- Recipe URL import (fetch a page, ask an LLM to extract the recipe) ---
@@ -1152,9 +1634,11 @@ _RECIPE_IMPORT_TEXT_LIMIT = 15000
 _RECIPE_EXTRACTION_PROMPT = (
     "You extract recipes from webpage text. Given the page text below, respond with ONLY "
     "a JSON object (no markdown fences, no commentary) shaped like "
-    '{"name": "...", "notes": "...", "ingredients": ["...", ...], "steps": ["...", ...]}. '
+    '{"name": "...", "notes": "...", "servings": 4, "ingredients": ["...", ...], "steps": ["...", ...]}. '
     "\"notes\" may be an empty string; it should hold any brief context about the dish, not "
-    "the ingredients or steps. If the page text below does not contain a recipe, respond "
+    "the ingredients or steps. \"servings\" is the number of servings the recipe makes, or "
+    "null if the page doesn't say. Write each ingredient as one line exactly as the page lists "
+    "it, amount first (\"1 1/2 cups flour, sifted\"). If the page text below does not contain a recipe, respond "
     'with exactly {"error": "not_a_recipe"} and nothing else.\n\nPage text:\n'
 )
 
@@ -1382,7 +1866,16 @@ def extract_recipe_url():
     if not name or not ingredients:
         return jsonify({"error": "Could not find a recipe on that page"}), 422
 
-    return jsonify({"name": name, "notes": notes, "ingredients": ingredients, "steps": steps})
+    servings = extracted.get("servings")
+    if not _valid_servings(servings):
+        servings = None
+    return jsonify({
+        "name": name, "notes": notes, "servings": servings, "source_url": url,
+        # Split into editor fields here so the review form shows amounts and
+        # units the user can correct before saving.
+        "ingredients": [ingr.parse_ingredient_line(i) for i in ingredients][:MAX_RECIPE_INGREDIENTS],
+        "steps": steps,
+    })
 
 
 # ---------------------------------------------------------------------------

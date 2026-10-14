@@ -2,25 +2,20 @@
 {% block head %}
 <meta name="account-id" content="{{ g.user.account_id }}">
 <meta name="username" content="{{ username }}">
+<script src="{{ url_for('static', filename='page-api.js') }}" defer></script>
+<script src="{{ url_for('static', filename='shopping-review.js') }}" defer></script>
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 {% endblock %}
 {% block body %}
 <div id="offline-banner" hidden>Offline — changes will sync when reconnected</div>
 <div id="sync-indicator" hidden>Syncing…</div>
 <header>
-    <h1>GroceryList</h1>
+    {% with active = 'list' %}{% include "_nav.html" %}{% endwith %}
     <div class="header-actions">
-        <a href="{{ url_for('recipes') }}" class="admin-btn">Recipes</a>
-        {% if is_admin %}
-        <a href="{{ url_for('admin_users') }}" class="admin-btn">Admin</a>
-        {% endif %}
         <button id="toggle-controls-btn" class="toggle-controls-btn" aria-label="Hide controls" title="Hide controls">
             <svg id="toggle-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4,6 8,10 12,6"/></svg>
         </button>
-        <form method="post" action="{{ url_for('logout') }}" style="display:inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="logout-btn">Logout</button>
-        </form>
+        {% include "_header_actions.html" %}
     </div>
 </header>
 
@@ -43,6 +38,7 @@
         <button id="add-btn" aria-label="Add item">+</button>
         <input type="text" id="notes-input" class="notes-input" placeholder="Notes (optional)" aria-label="Notes">
     </div>
+    <div id="meal-strip" class="meal-strip" hidden></div>
 </div>
 
 <div id="app-message" role="alert" hidden></div>
