@@ -34,6 +34,48 @@ CREATE TABLE IF NOT EXISTS item_name_history (
     last_used TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS recipes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    notes TEXT,
+    steps TEXT,
+    servings INTEGER NOT NULL DEFAULT 4,
+    source_url TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS recipe_ingredients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    qty REAL,
+    unit TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    sort INTEGER NOT NULL DEFAULT 0
+);
+
+-- A meal on a household-local calendar date (YYYY-MM-DD, sent by the browser).
+CREATE TABLE IF NOT EXISTS planned_meals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'cook' CHECK (kind IN ('cook', 'leftovers', 'flexible')),
+    recipe_id INTEGER REFERENCES recipes(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    leftover_of INTEGER REFERENCES planned_meals(id) ON DELETE SET NULL,
+    servings INTEGER,
+    notes TEXT,
+    sort INTEGER NOT NULL DEFAULT 0,
+    added_to_list_id INTEGER REFERENCES lists(id) ON DELETE SET NULL,
+    added_to_list_at TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS planned_meals_date ON planned_meals(date);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT DEFAULT (datetime('now')),

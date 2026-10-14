@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block head %}
+<meta name="account-id" content="{{ g.user.account_id }}">
+<meta name="username" content="{{ username }}">
+<script src="{{ url_for('static', filename='page-api.js') }}" defer></script>
+<script src="{{ url_for('static', filename='shopping-review.js') }}" defer></script>
+<script src="{{ url_for('static', filename='meals.js') }}" defer></script>
+{% endblock %}
+{% block body %}
+<header>
+    {% with active = 'meals' %}{% include "_nav.html" %}{% endwith %}
+    <div class="header-actions">
+        {% include "_header_actions.html" %}
+    </div>
+</header>
+
+<div class="week-bar">
+    <button id="prev-week" class="week-nav-btn" aria-label="Previous week">&#8249;</button>
+    <div class="week-title">
+        <div id="week-label" class="week-label"></div>
+        <div id="week-range" class="week-range"></div>
+    </div>
+    <button id="next-week" class="week-nav-btn" aria-label="Next week">&#8250;</button>
+</div>
+
+<p id="meals-error" class="page-error" role="alert" hidden></p>
+
+<main class="meals-main">
+    <ol id="week-days" class="week-days"></ol>
+</main>
+
+<div class="bottom-actions meals-actions">
+    <button id="this-week-btn" class="secondary-btn" hidden>Back to this week</button>
+    <button id="add-week-btn" class="primary-btn" disabled>Add this week to list</button>
+</div>
+{% endblock %}

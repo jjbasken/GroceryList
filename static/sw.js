@@ -8,6 +8,9 @@ const ACCOUNT_MARKER = '/__offline_account__';
 const APP_SHELL = [
     '/static/app.js',
     '/static/offline-security.js',
+    // The grocery list page loads these for the meals strip and review sheet.
+    '/static/page-api.js',
+    '/static/shopping-review.js',
     '/static/style.css',
     '/static/icon-192.png',
     '/static/icon-512.png',

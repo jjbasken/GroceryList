@@ -11,6 +11,9 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 - **Autocomplete** — item name history for quick re-entry
 - **Real-time sync** — Server-Sent Events push changes to all open tabs/clients instantly
 - **Offline support** — service worker caches the app shell; queued writes sync when connectivity returns
+- **Recipes** — a shared library with structured ingredients (amount, unit, note), servings, a source link and steps; search by name, scale a recipe to any number of servings, and import from a URL (optional, needs `ANTHROPIC_API_KEY`) or JSON
+- **Meal planning** — plan each day of a Monday-to-Sunday week as a cook night (a recipe or a typed dish), leftovers from an earlier cook night, or a flexible easy night
+- **Ingredients to the list** — add a recipe or a week of cook nights to any list after reviewing the combined, scaled ingredients (see [Meals and recipes](#meals-and-recipes))
 - **Admin panel** — user management, password resets, activation/deactivation, session revocation, audit log
 - **External API** — optional token-authenticated endpoints so companion apps (e.g. [MenuPlanner](https://github.com/jjbasken/MenuPlanner)) can push items onto a list
 - **Security** — CSRF protection, bcrypt passwords, rate limiting, strict CSP headers, HttpOnly cookies
@@ -99,6 +102,7 @@ All configuration is via environment variables:
 | `TRUST_PROXY_HEADERS` | No | `false` | Trust proxy client/scheme headers; enable only behind the configured tunnel |
 | `TRUSTED_PROXY_HOPS` | No | `1` | Number of trusted proxy hops |
 | `EXTERNAL_API_TOKEN` | No | — | Shared secret for `/api/external/*`; when unset those endpoints return 404 |
+| `ANTHROPIC_API_KEY` | No | — | Enables recipe import from a URL; when unset the option is hidden |
 
 ## Cloudflare Tunnel
 
@@ -120,6 +124,29 @@ Navigate to `/admin/users` (admin users only) to:
 - Reset a user's password (they must change it on next login)
 - Revoke all of a user's sessions
 - View the 200 most recent audit log entries
+
+## Meals and recipes
+
+The header's **List · Meals · Recipes** switch moves between the grocery list,
+the week's meal plan and the recipe library. The list stays the home page: when
+meals are planned for the next seven days, a small strip under the add bar shows
+what's for dinner and offers **Add ingredients**. With nothing planned, the list
+looks exactly as it always has.
+
+- **Recipes:** each ingredient has a name, an amount (`2`, `1.5`, `1/2`, `1 1/2` or `1½`), a unit and a note. You can paste a block of ingredient lines and they're split into those fields. A recipe page has a servings stepper that rescales every amount, plus **Add to list** and **Plan it**.
+- **Meals:** tap a day to add a cook night, leftovers or a flexible night, and tap a meal to edit, move or remove it. Cook nights are numbered ("Cook 2 of 4"). Deleting a recipe keeps any planned meals that used it, by name.
+- **Adding ingredients:** **Add this week to list** (or a recipe's **Add to list**) opens a review sheet before anything is written:
+  - Only cook nights with a recipe contribute ingredients, each scaled to the meal's servings.
+  - Matching ingredients are combined across meals, ignoring case and simple plurals. Volumes and weights are converted and summed ("1 lb" + "16 oz" → "2 lb"); other units are listed side by side ("8 oz + 2 cans").
+  - Each item gets a note saying which meals need it ("for Tacos, Chili").
+  - **Already on the list and not bought:** the amounts are combined into that item instead of adding a duplicate. If the existing quantity can't be read, the extra amount goes in its notes.
+  - **Already bought:** unticked by default and labelled "Bought — still need?".
+  - Cook nights without a recipe are listed so you can add their ingredients by hand.
+  - Afterwards the meals show "✓ On <list>", and adding them again warns first.
+
+Recipes and meals are shared by the whole household, like lists. Only a recipe's
+creator or an admin can delete it. These pages need a connection; offline, the
+grocery list works as before and the meals strip is hidden.
 
 ## External API
 
@@ -228,8 +255,13 @@ requirements-dev.in / requirements-dev.txt  # Test/CI tooling
 tests/           # pytest suite + offline security JS test
 Dockerfile
 docker-compose.yml
+ingredients.py   # Ingredient parsing, unit conversion, scaling and combining
 static/
-  app.js         # Main frontend logic
+  app.js         # Main frontend logic (grocery list)
+  page-api.js    # Shared fetch/modal/date helpers for the recipes and meals pages
+  recipes.js     # Recipe library, detail and editor
+  meals.js       # Weekly meal plan
+  shopping-review.js  # Review sheet for adding ingredients to a list
   sw.js          # Service worker (offline + sync queue)
   style.css
   manifest.webmanifest

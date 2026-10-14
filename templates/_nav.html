@@ -1,0 +1,7 @@
+{# Shared header navigation. Set `active` to 'list', 'meals' or 'recipes' before including. #}
+<h1 class="visually-hidden">GroceryList</h1>
+<nav class="app-nav" aria-label="Main">
+    <a href="{{ url_for('index') }}" class="app-nav-link{% if active == 'list' %} active{% endif %}"{% if active == 'list' %} aria-current="page"{% endif %}>List</a>
+    <a href="{{ url_for('meals') }}" class="app-nav-link{% if active == 'meals' %} active{% endif %}"{% if active == 'meals' %} aria-current="page"{% endif %}>Meals</a>
+    <a href="{{ url_for('recipes') }}" class="app-nav-link{% if active == 'recipes' %} active{% endif %}"{% if active == 'recipes' %} aria-current="page"{% endif %}>Recipes</a>
+</nav>

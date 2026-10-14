@@ -820,12 +820,91 @@
     itemInput.addEventListener("blur", () => { suggestionsDropdown.hidden = true; });
     clearBoughtBtn.addEventListener("click", clearBought);
 
+    // ---- This week's meals strip ----
+    // A quiet link into meal planning. It only appears when meals are planned
+    // from today on, and is hidden offline: meal data is not cached and the
+    // review sheet needs the server.
+
+    const mealStrip = document.getElementById("meal-strip");
+    let mealStripSeq = 0;
+
+    function localISODate(d) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    }
+
+    async function loadMealStrip() {
+        if (!mealStrip) return;
+        const seq = ++mealStripSeq;
+        if (!navigator.onLine) { mealStrip.hidden = true; return; }
+        const today = localISODate(new Date());
+        let meals;
+        try {
+            const res = await fetch(`/api/meals?start=${today}&days=7`, { headers: { "X-Account-ID": accountId } });
+            if (!res.ok) throw new Error("meals_failed");
+            meals = await res.json();
+        } catch (e) {
+            if (seq === mealStripSeq) mealStrip.hidden = true;
+            return;
+        }
+        if (seq !== mealStripSeq) return;
+        renderMealStrip(meals, today);
+    }
+
+    function renderMealStrip(meals, today) {
+        mealStrip.textContent = "";
+        if (!meals.length) { mealStrip.hidden = true; return; }
+
+        const first = meals[0];
+        const summary = document.createElement("a");
+        summary.href = "/meals";
+        summary.className = "meal-strip-summary";
+        const when = first.date === today ? "Tonight"
+            : new Date(`${first.date}T00:00`).toLocaleDateString(undefined, { weekday: "short" });
+        const lead = document.createElement("strong");
+        lead.textContent = `${when}: `;
+        summary.append(lead, first.title);
+        if (meals.length > 1) {
+            const more = document.createElement("span");
+            more.className = "meal-strip-more";
+            more.textContent = ` · +${meals.length - 1} more`;
+            summary.appendChild(more);
+        }
+        mealStrip.appendChild(summary);
+
+        const pending = meals.filter(m => m.kind === "cook" && m.recipe_id && !m.added_to_list_at);
+        if (pending.length && window.ShoppingReview) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "meal-strip-btn";
+            btn.textContent = "Add ingredients";
+            btn.addEventListener("click", () => window.ShoppingReview.open({
+                mealIds: pending.map(m => m.id),
+                listId: currentListId,
+                title: `Next 7 days: ${pending.map(m => m.title).join(", ")}`,
+                onDone: (result, listId) => {
+                    if (listId !== currentListId && currentLists.some(l => l.id === listId)) {
+                        currentListId = listId;
+                        listSelect.value = listId;
+                    }
+                    loadItems();
+                    loadMealStrip();
+                },
+            }));
+            mealStrip.appendChild(btn);
+        }
+        mealStrip.hidden = false;
+    }
+
+    window.addEventListener('online', loadMealStrip);
+    window.addEventListener('offline', loadMealStrip);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadMealStrip(); });
+
     // ---- SSE ----
 
     function connectSSE() {
         const es = new EventSource("/api/stream");
         // Skip SSE-triggered reloads while we have unsynced local mutations
-        es.addEventListener("update", () => loadItems());
+        es.addEventListener("update", () => { loadItems(); loadMealStrip(); });
         es.addEventListener("lists", () => loadLists().then(() => loadItems()));
         es.onerror = () => {
             es.close();
@@ -843,6 +922,7 @@
     updateOfflineBanner();
     loadLists().then(() => loadItems());
     loadHistory();
+    loadMealStrip();
     connectSSE();
     // Replay any ops queued during a previous offline session
     if (navigator.onLine) flushQueue();

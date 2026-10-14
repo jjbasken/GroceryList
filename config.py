@@ -6,6 +6,9 @@ BOOTSTRAP_TOKEN = os.environ.get("BOOTSTRAP_TOKEN", "")
 ENFORCE_HTTPS = os.environ.get("ENFORCE_HTTPS", "false").lower() in ("1", "true", "yes")
 TRUST_PROXY_HEADERS = os.environ.get("TRUST_PROXY_HEADERS", "false").lower() in ("1", "true", "yes")
 TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+# Optional: enables "Import from URL" recipe extraction. The app runs fine
+# without it -- that feature is just hidden/disabled when unset.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # No per-token expiry: tokens stay valid for the life of the session. The PWA
 # can sit open for days between page renders, so a timed token would go stale
 # and break writes until a manual refresh. Tokens are still session-bound.

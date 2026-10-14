@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block head %}
+<meta name="account-id" content="{{ g.user.account_id }}">
+<meta name="username" content="{{ username }}">
+<meta name="import-url-enabled" content="{{ 'true' if import_url_enabled else 'false' }}">
+<meta name="recipe-id" content="{{ recipe_id or '' }}">
+<script src="{{ url_for('static', filename='page-api.js') }}" defer></script>
+<script src="{{ url_for('static', filename='shopping-review.js') }}" defer></script>
+<script src="{{ url_for('static', filename='recipes.js') }}" defer></script>
+{% endblock %}
+{% block body %}
+<header>
+    {% with active = 'recipes' %}{% include "_nav.html" %}{% endwith %}
+    <div class="header-actions">
+        {% include "_header_actions.html" %}
+    </div>
+</header>
+
+<main class="recipes-main">
+    <section id="library-view" hidden>
+        <div class="recipes-toolbar">
+            <input type="search" id="recipe-search" class="recipe-search" placeholder="Search recipes" aria-label="Search recipes" autocomplete="off">
+            <button id="new-recipe-btn" class="admin-action-btn btn-ok">+ New</button>
+            <button id="import-recipe-btn" class="admin-action-btn">Import</button>
+        </div>
+        <ul id="recipe-list" class="recipe-list"></ul>
+        <p id="recipes-empty" class="empty-msg" hidden></p>
+    </section>
+
+    <article id="detail-view" class="recipe-detail" hidden></article>
+</main>
+
+<div id="modal-overlay" class="modal-overlay" hidden>
+    <div id="modal" class="modal" role="dialog" aria-modal="true"></div>
+</div>
+{% endblock %}
