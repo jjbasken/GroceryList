@@ -15,7 +15,6 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 - **Meal planning** — plan each day of a Monday-to-Sunday week as a cook night (a recipe or a typed dish), leftovers from an earlier cook night, or a flexible easy night
 - **Ingredients to the list** — add a recipe or a week of cook nights to any list after reviewing the combined, scaled ingredients (see [Meals and recipes](#meals-and-recipes))
 - **Admin panel** — user management, password resets, activation/deactivation, session revocation, audit log
-- **External API** — optional token-authenticated endpoints so companion apps (e.g. [MenuPlanner](https://github.com/jjbasken/MenuPlanner)) can push items onto a list
 - **Security** — CSRF protection, bcrypt passwords, rate limiting, strict CSP headers, HttpOnly cookies
 
 ## Stack
@@ -49,8 +48,6 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
    # Linux bind-mount ownership (use `id -u` and `id -g`)
    APP_UID=1000
    APP_GID=1000
-   # Optional — enables the /api/external/* endpoints (see "External API")
-   EXTERNAL_API_TOKEN=
    ```
 
    Generate each secret independently, for example with
@@ -101,7 +98,6 @@ All configuration is via environment variables:
 | `ENFORCE_HTTPS` | No | `false` | Redirect HTTP to HTTPS; Compose defaults this to `true` |
 | `TRUST_PROXY_HEADERS` | No | `false` | Trust proxy client/scheme headers; enable only behind the configured tunnel |
 | `TRUSTED_PROXY_HOPS` | No | `1` | Number of trusted proxy hops |
-| `EXTERNAL_API_TOKEN` | No | — | Shared secret for `/api/external/*`; when unset those endpoints return 404 |
 | `ANTHROPIC_API_KEY` | No | — | Enables recipe import from a URL; when unset the option is hidden |
 
 ## Cloudflare Tunnel
@@ -147,39 +143,6 @@ looks exactly as it always has.
 Recipes and meals are shared by the whole household, like lists. Only a recipe's
 creator or an admin can delete it. These pages need a connection; offline, the
 grocery list works as before and the meals strip is hidden.
-
-## External API
-
-Companion apps can add items without a browser session by sending a bearer token.
-Generate one (e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`),
-set it as `EXTERNAL_API_TOKEN`, and give the same value to the companion app.
-These endpoints don't use cookies, so they're exempt from CSRF and `X-Account-ID`
-checks.
-
-`GET /api/external/lists` → `[{"id": 1, "name": "Groceries"}, ...]`
-
-`POST /api/external/items`
-
-```json
-{
-  "list_id": 1,
-  "merge": true,
-  "items": [
-    {"name": "Chicken breast", "quantity": "2 lb", "notes": "for Fajitas", "section": "now"}
-  ]
-}
-```
-
-- `list_id` is optional and defaults to the first list. An unknown id returns 400.
-- A request can carry up to 100 items. `name` is required. `quantity` (≤50 chars), `notes` (≤500) and `section` (`now`/`later`, default `now`) are optional. If any item is invalid, nothing is added.
-- With `merge: true`, an item with the same name as an un-bought item on the same list (case-insensitive) doesn't create a duplicate. Its quantity and notes are appended to the existing item's notes instead.
-- A successful request returns 201 with `{"added": [...items], "merged": [...items]}`. Connected clients refresh immediately via SSE, and the request is recorded in the audit log.
-
-Containers on the same Docker host can call `http://web:5000` directly by joining
-the `grocery-net` network, which has a fixed name in `docker-compose.yml`. Direct
-calls arrive without `X-Forwarded-Proto`, so they're exempt from the HTTPS
-redirect. A plain-HTTP request that comes in through the tunnel is still
-redirected.
 
 ## Security upgrade and offline storage
 
