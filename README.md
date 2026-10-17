@@ -13,6 +13,8 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 - **Offline support** — service worker caches the app shell; queued writes sync when connectivity returns
 - **Recipes** — a shared library with structured ingredients (amount, unit, note), servings, a source link and steps; search by name, scale a recipe to any number of servings, and import from a URL (optional, needs `ANTHROPIC_API_KEY`) or JSON
 - **Meal planning** — plan each day of a Monday-to-Sunday week as a cook night (a recipe or a typed dish), leftovers from an earlier cook night, or a flexible easy night
+- **Week menu** — list the meals for a week without picking days, then pick a day for each one when you're ready (or just cook from the list)
+- **Kids' lunches** — for each kid and school day (Mon–Fri), track whether lunch is from home or school and what they're having; copy last week's lunches in one tap
 - **Ingredients to the list** — add a recipe or a week of cook nights to any list after reviewing the combined, scaled ingredients (see [Meals and recipes](#meals-and-recipes))
 - **Admin panel** — user management, password resets, activation/deactivation, session revocation, audit log
 - **Security** — CSRF protection, bcrypt passwords, rate limiting, strict CSP headers, HttpOnly cookies

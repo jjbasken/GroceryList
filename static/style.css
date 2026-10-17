@@ -1376,6 +1376,127 @@ section h2 {
 
 .add-meal-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* Week menu and kids' lunches */
+.week-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+}
+
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.section-head h2 { margin: 0; padding: 0; font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.section-hint { color: var(--text-muted); font-size: 0.85rem; }
+.section-actions { margin-left: auto; display: flex; gap: 4px; }
+
+.link-btn {
+    min-height: 36px;
+    padding: 0 8px;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.link-btn:hover { text-decoration: underline; }
+
+.menu-item { display: flex; gap: 6px; align-items: stretch; }
+.menu-item .meal-card { flex: 1; min-width: 0; }
+
+.pick-day {
+    flex-shrink: 0;
+    max-width: 8.5rem;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+}
+
+.day-lunches {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.day-lunches-label { color: var(--text-muted); font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.day-lunches ul { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+
+.lunch-row {
+    width: 100%;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.9rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.lunch-row:hover { border-color: var(--accent); }
+.lunch-kid { font-weight: 600; min-width: 3.5rem; }
+.lunch-choice { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text-muted); }
+.lunch-unset { color: var(--text-muted); font-style: italic; }
+
+.lunch-pill {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.lunch-home { color: var(--accent); }
+.lunch-school { color: #0969da; }
+
+@media (prefers-color-scheme: dark) {
+    .lunch-school { color: #58a6ff; }
+}
+
+.menu-pick { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.menu-pick-options { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.menu-pick-btn {
+    min-height: 40px;
+    padding: 0 12px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--accent);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.menu-pick-btn:hover { background: var(--accent); color: #ffffff; }
+
+.modal label.check-label { flex-direction: row; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--text); }
+.check-label input { width: 18px; height: 18px; }
+
+.kids-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.kids-list:empty { display: none; }
+.kid-row, .modal form.kid-add { display: flex; flex-direction: row; gap: 8px; }
+.kid-row input, .kid-add input { flex: 1; min-width: 0; }
+
 .meals-actions {
     position: sticky;
     bottom: 0;

@@ -53,7 +53,7 @@ def _clean_db(app):
     with app.app_context():
         db = get_db()
         for table in (
-            "audit_log", "item_name_history", "planned_meals", "recipe_ingredients", "recipes",
+            "audit_log", "item_name_history", "kid_lunches", "kids", "planned_meals", "recipe_ingredients", "recipes",
             "items", "lists", "users",
         ):
             db.execute(f"DELETE FROM {table}")  # noqa: S608

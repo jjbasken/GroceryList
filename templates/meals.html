@@ -26,6 +26,27 @@
 <p id="meals-error" class="page-error" role="alert" hidden></p>
 
 <main class="meals-main">
+    <section class="week-section" aria-labelledby="menu-heading">
+        <div class="section-head">
+            <h2 id="menu-heading">This week's menu</h2>
+            <span class="section-hint">Meals to pick from, no day needed</span>
+        </div>
+        <ul id="menu-meals" class="day-meals menu-meals"></ul>
+        <button type="button" id="add-menu-btn" class="add-meal-btn">+ Add to menu</button>
+    </section>
+
+    <section class="week-section" aria-labelledby="lunch-heading">
+        <div class="section-head">
+            <h2 id="lunch-heading">Kids' lunches</h2>
+            <span id="lunch-summary" class="section-hint"></span>
+            <span class="section-actions">
+                <button type="button" id="copy-lunches-btn" class="link-btn" hidden>Copy last week</button>
+                <button type="button" id="manage-kids-btn" class="link-btn">Kids</button>
+            </span>
+        </div>
+        <p id="no-kids-hint" class="section-hint" hidden>Add your kids to track home or school lunch for each school day.</p>
+    </section>
+
     <ol id="week-days" class="week-days"></ol>
 </main>
 
