@@ -1227,7 +1227,10 @@ def get_meals():
     days = request.args.get("days", default=7, type=int)
     if not 1 <= days <= MAX_MEAL_RANGE_DAYS:
         return jsonify({"error": f"days must be 1-{MAX_MEAL_RANGE_DAYS}"}), 400
-    end = start + timedelta(days=days - 1)
+    try:
+        end = start + timedelta(days=days - 1)
+    except OverflowError:
+        return jsonify({"error": "Date range exceeds supported dates"}), 400
     rows = _fetch_meals(get_db(), start=start.isoformat(), end=end.isoformat())
     return jsonify([dict(r) for r in rows])
 
@@ -1378,7 +1381,10 @@ def get_lunches():
     days = request.args.get("days", default=7, type=int)
     if not 1 <= days <= MAX_MEAL_RANGE_DAYS:
         return jsonify({"error": f"days must be 1-{MAX_MEAL_RANGE_DAYS}"}), 400
-    end = start + timedelta(days=days - 1)
+    try:
+        end = start + timedelta(days=days - 1)
+    except OverflowError:
+        return jsonify({"error": "Date range exceeds supported dates"}), 400
     rows = get_db().execute(
         "SELECT kid_id, date, kind, choice FROM kid_lunches WHERE date >= ? AND date <= ? ORDER BY date, kid_id",
         (start.isoformat(), end.isoformat()),
@@ -1400,7 +1406,11 @@ def set_lunch():
     lunch_date = _parse_iso_date(data.get("date"))
     if lunch_date is None:
         return jsonify({"error": "Date must be YYYY-MM-DD"}), 400
-    kind = data.get("kind")
+    if lunch_date.weekday() >= 5:
+        return jsonify({"error": "Lunches must be on a school day (Monday to Friday)"}), 400
+    if "kind" not in data:
+        return jsonify({"error": "kind is required (use null to clear a lunch)"}), 400
+    kind = data["kind"]
     if kind is None:
         db.execute("DELETE FROM kid_lunches WHERE kid_id = ? AND date = ?", (kid_id, lunch_date.isoformat()))
         db.commit()
@@ -1436,6 +1446,14 @@ def copy_lunch_week():
     target = _parse_iso_date(data.get("to"))
     if source is None or target is None:
         return jsonify({"error": "from and to must be YYYY-MM-DD"}), 400
+    # Weeks run Monday through Friday, regardless of the supplied day.
+    source -= timedelta(days=source.weekday())
+    target -= timedelta(days=target.weekday())
+    try:
+        source_end = source + timedelta(days=4)
+        target + timedelta(days=4)
+    except OverflowError:
+        return jsonify({"error": "Week exceeds supported dates"}), 400
     shift = (target - source).days
     if shift == 0:
         return jsonify({"error": "Pick a different week"}), 400
@@ -1444,7 +1462,7 @@ def copy_lunch_week():
         "INSERT OR IGNORE INTO kid_lunches (kid_id, date, kind, choice) "
         "SELECT kid_id, date(date, ? || ' days'), kind, choice FROM kid_lunches "
         "WHERE date >= ? AND date <= ?",
-        (f"{shift:+d}", source.isoformat(), (source + timedelta(days=6)).isoformat()),
+        (f"{shift:+d}", source.isoformat(), source_end.isoformat()),
     )
     db.commit()
     broadcast("update")

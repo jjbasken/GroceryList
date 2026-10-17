@@ -61,7 +61,7 @@
             showError("");
             render();
         } catch (e) {
-            if (e.message === "unauthorized") return;
+            if (seq !== loadSeq || e.message === "unauthorized") return;
             showError("Couldn't load meals — check your connection.");
         }
     }
@@ -75,6 +75,9 @@
 
     function goToWeek(start) {
         week = start;
+        // Clear the previous week before offering menu and shopping actions.
+        meals = [];
+        lunches = [];
         const url = start === weekStart(today) ? "/meals" : `/meals?week=${start}`;
         history.replaceState(null, "", url);
         render();
@@ -144,7 +147,7 @@
             return `
                 <li>
                     <button type="button" class="lunch-row" data-kid-id="${kid.id}" data-date="${date}"
-                            aria-label="${esc(kid.name)}'s lunch on ${esc(dayLabel(date, { weekday: "long" }))}">
+                            aria-label="${esc(kid.name)}'s lunch on ${esc(dayLabel(date, { weekday: "long" }))}: ${lunch ? LUNCH_LABELS[lunch.kind] : "Not set"}${lunch && lunch.choice ? `, ${esc(lunch.choice)}` : ""}">
                         <span class="lunch-kid">${esc(kid.name)}</span>${what}
                     </button>
                 </li>`;
@@ -289,6 +292,9 @@
     // ---- Kids sheet ----
 
     function openKidsSheet() {
+        // Live page refreshes must not replace the sheet's working state.
+        let sheetKids = kids.map((kid) => ({ ...kid }));
+        let adding = false;
         const modal = openModal(`
             <h2>Kids</h2>
             <p class="modal-hint">Each kid gets a home or school lunch on every school day.</p>
@@ -312,7 +318,7 @@
         }
 
         function renderKids() {
-            listEl.innerHTML = kids.map((kid) => `
+            listEl.innerHTML = sheetKids.map((kid) => `
                 <li class="kid-row">
                     <input type="text" maxlength="50" value="${esc(kid.name)}" data-kid-id="${kid.id}" aria-label="Name">
                     <button type="button" class="admin-action-btn btn-warn" data-remove="${kid.id}">Remove</button>
@@ -322,17 +328,17 @@
                     const { ok, data } = await send(`/api/kids/${input.dataset.kidId}`, "PUT", { name: input.value });
                     if (!ok) { fail(data, "Couldn't rename."); return; }
                     errorBox.hidden = true;
-                    const kid = kids.find((k) => k.id === data.id);
+                    const kid = sheetKids.find((k) => k.id === data.id);
                     if (kid) kid.name = data.name;
                 });
             });
             listEl.querySelectorAll("[data-remove]").forEach((btn) => {
                 btn.addEventListener("click", async () => {
-                    const kid = kids.find((k) => k.id === Number(btn.dataset.remove));
+                    const kid = sheetKids.find((k) => k.id === Number(btn.dataset.remove));
                     if (!kid || !window.confirm(`Remove ${kid.name} and all their lunches?`)) return;
                     const { ok, data } = await send(`/api/kids/${kid.id}`, "DELETE");
                     if (!ok) { fail(data, "Couldn't remove."); return; }
-                    kids = kids.filter((k) => k.id !== kid.id);
+                    sheetKids = sheetKids.filter((k) => k.id !== kid.id);
                     renderKids();
                 });
             });
@@ -340,17 +346,23 @@
 
         modal.querySelector("#kid-form").addEventListener("submit", async (e) => {
             e.preventDefault();
+            if (adding) return;
+            adding = true;
+            const submit = modal.querySelector('#kid-form button[type="submit"]');
+            submit.disabled = true;
             const { ok, data } = await send("/api/kids", "POST", { name: nameInput.value });
+            adding = false;
+            submit.disabled = false;
             if (!ok) { fail(data, "Couldn't add."); return; }
             errorBox.hidden = true;
-            kids.push(data);
+            sheetKids.push(data);
             nameInput.value = "";
             renderKids();
             nameInput.focus();
         });
         modal.querySelector("#kids-done").addEventListener("click", closeModal);
         renderKids();
-        if (!kids.length) nameInput.focus();
+        if (!sheetKids.length) nameInput.focus();
     }
 
     // ---- Add / edit sheet ----

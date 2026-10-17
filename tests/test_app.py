@@ -2223,3 +2223,63 @@ class TestRecipeUrlImport:
              patch("app.anthropic.Anthropic", return_value=fake_client):
             rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/page"})
         assert rv.status_code == 422
+
+
+class TestLunchReviewRegressions:
+    def test_missing_kind_does_not_clear_saved_lunch(self, client):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        payload = {'kid_id': kid, 'date': '2026-10-12', 'kind': 'home', 'choice': 'Sandwich'}
+        assert jput(client, '/api/lunches', payload).status_code == 200
+        assert jput(client, '/api/lunches', {'kid_id': kid, 'date': payload['date']}).status_code == 400
+        assert client.get('/api/lunches?start=2026-10-12').get_json()[0]['choice'] == 'Sandwich'
+
+    @pytest.mark.parametrize('day', ['2026-10-17', '2026-10-18'])
+    def test_rejects_invisible_weekend_lunches(self, client, day):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        assert jput(client, '/api/lunches', {'kid_id': kid, 'date': day, 'kind': 'home'}).status_code == 400
+        assert client.get('/api/lunches?start=2026-10-12').get_json() == []
+
+    def test_copy_normalizes_week_and_preserves_weekdays(self, client):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        jput(client, '/api/lunches', {'kid_id': kid, 'date': '2026-10-12', 'kind': 'school'})
+        rv = jpost(client, '/api/lunches/copy-week', {'from': '2026-10-14', 'to': '2026-10-23'})
+        assert rv.get_json() == {'copied': 1}
+        assert client.get('/api/lunches?start=2026-10-19').get_json() == [
+            {'kid_id': kid, 'date': '2026-10-19', 'kind': 'school', 'choice': None}]
+        assert jpost(client, '/api/lunches/copy-week', {'from': '2026-10-12', 'to': '2026-10-16'}).status_code == 400
+
+    @pytest.mark.parametrize('endpoint', ['meals', 'lunches'])
+    def test_date_range_overflow_is_client_error(self, client, endpoint):
+        make_user()
+        do_login(client)
+        assert client.get(f'/api/{endpoint}?start=9999-12-31&days=7').status_code == 400
+        assert client.get(f'/api/{endpoint}?start=9999-12-31&days=1').status_code == 200
+
+
+@pytest.mark.parametrize('method,path', [
+    ('get', '/api/kids'), ('post', '/api/kids'),
+    ('put', '/api/kids/1'), ('delete', '/api/kids/1'),
+    ('get', '/api/lunches?start=2026-10-12'), ('put', '/api/lunches'),
+    ('post', '/api/lunches/copy-week'),
+])
+def test_lunch_endpoints_require_authentication(client, method, path):
+    assert getattr(client, method)(path, json={}).status_code == 401
+
+
+@pytest.mark.parametrize('method,path', [
+    ('post', '/api/kids'), ('put', '/api/kids/1'), ('delete', '/api/kids/1'),
+    ('put', '/api/lunches'), ('post', '/api/lunches/copy-week'),
+])
+def test_lunch_writes_require_csrf(client, app, method, path):
+    make_user()
+    do_login(client)
+    with patch.dict(app.config, WTF_CSRF_ENABLED=True):
+        rv = getattr(client, method)(path, json={})
+    assert rv.status_code == 400
+    assert rv.get_json()['error'] == 'csrf'
