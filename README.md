@@ -19,6 +19,35 @@ A self-hosted, multi-user grocery list web app built with Flask. Items are organ
 - **Admin panel** — user management, password resets, activation/deactivation, session revocation, audit log
 - **Security** — CSRF protection, bcrypt passwords, rate limiting, strict CSP headers, HttpOnly cookies
 
+## Screenshots
+
+These screenshots use fictional sample data from a local demo.
+
+### Grocery lists
+
+Track quantities and notes, save items for later, and check off purchases.
+
+![Desktop grocery list with sample groceries, Now and Later sections, and purchased items](docs/screenshots/grocery-list-desktop.png)
+
+### Weekly meals and kids' lunches
+
+Keep meals on the week menu until you pick a day, and plan home or school lunches for each child.
+
+![Weekly meal planner with unscheduled menu meals, daily dinners, and sample kids' lunches](docs/screenshots/meal-planner-desktop.png)
+
+### Recipes
+
+Keep ingredients, servings, and cooking steps together, then review ingredients before adding them to a grocery list.
+
+![Black bean tacos recipe with ingredients and cooking instructions](docs/screenshots/recipe-desktop.png)
+
+<details>
+<summary>See the grocery list on a phone</summary>
+
+<img src="docs/screenshots/grocery-list-mobile.png" alt="Phone view of a sample grocery list with quantities and notes" width="320">
+
+</details>
+
 ## Stack
 
 | Layer | Technology |
