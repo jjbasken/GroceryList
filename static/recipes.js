@@ -347,6 +347,28 @@
 
     // ---- Import ----
 
+    // For people without server-side URL import: paste this into any AI chat
+    // along with a recipe link and paste the reply into "From JSON". Its shape
+    // matches what prefillFromImport accepts.
+    const AI_IMPORT_PROMPT = [
+        "Open the recipe at the URL I give you at the end of this message and convert it to JSON for my recipe app.",
+        "",
+        "Respond with ONLY a JSON object (no markdown code fences, no commentary) shaped exactly like this:",
+        '{"name": "...", "notes": "...", "servings": 4, "source_url": "...", "ingredients": ["...", "..."], "steps": ["...", "..."]}',
+        "",
+        "Rules:",
+        '- "name": the recipe title.',
+        '- "notes": one or two sentences of context about the dish (not the ingredients or steps), or an empty string.',
+        '- "servings": a whole number of servings the recipe makes, or null if the page doesn\'t say.',
+        '- "source_url": the URL I gave you.',
+        '- "ingredients": one string per ingredient, written as the page lists it, amount first (e.g. "1 1/2 cups flour, sifted"). Leave out section headings like "For the sauce".',
+        '- "steps": one string per instruction step, in order, without step numbers.',
+        "- Use only what is on the page. Do not invent or substitute ingredients.",
+        '- If you cannot open the page or it has no recipe, respond with exactly {"error": "not_a_recipe"} and nothing else.',
+        "",
+        "Recipe URL: ",
+    ].join("\n");
+
     function importChooserHtml() {
         return `
             <h2>Import Recipe</h2>
@@ -365,6 +387,12 @@
                 </label>
                 <input type="file" id="import-json-file" accept="application/json">
                 <button type="button" id="import-json-btn" class="admin-action-btn btn-ok">Use JSON</button>
+                <details class="paste-ingredients">
+                    <summary>Get JSON from an AI assistant</summary>
+                    <p class="modal-hint">Copy this prompt into ChatGPT, Claude or similar, paste the recipe's URL at the end, then paste the reply above.</p>
+                    <textarea id="import-ai-prompt" rows="6" readonly>${escapeHtml(AI_IMPORT_PROMPT)}</textarea>
+                    <button type="button" id="import-ai-copy" class="admin-action-btn">Copy prompt</button>
+                </details>
             </div>
             <p id="import-error" class="modal-error" hidden></p>
             <div class="modal-actions">
@@ -377,6 +405,7 @@
     // server's parser so the rows come back split into amount/unit/name.
     async function prefillFromImport(data) {
         if (!data || typeof data !== "object") return { error: 'JSON must include a "name" and at least one ingredient' };
+        if (data.error === "not_a_recipe") return { error: "The assistant couldn't find a recipe at that URL" };
         const name = typeof data.name === "string" ? data.name.slice(0, 200) : "";
         const raw = Array.isArray(data.ingredients) ? data.ingredients.slice(0, 100) : [];
         const lines = raw.filter((i) => typeof i === "string" && i.trim());
@@ -469,6 +498,19 @@
             const text = modal.querySelector("#import-json-input").value.trim();
             if (!text) { showImportError("Paste or choose a JSON file first"); return; }
             useJsonText(text);
+        });
+
+        modal.querySelector("#import-ai-copy").addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(AI_IMPORT_PROMPT);
+                toast("Prompt copied");
+            } catch (e) {
+                // Clipboard API needs a secure context; leave it selected to copy by hand.
+                const box = modal.querySelector("#import-ai-prompt");
+                box.focus();
+                box.select();
+                toast("Press Ctrl+C (or long-press) to copy");
+            }
         });
 
         modal.querySelector("#import-json-file").addEventListener("change", (e) => {
