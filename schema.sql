@@ -57,9 +57,12 @@ CREATE TABLE IF NOT EXISTS recipe_ingredients (
 );
 
 -- A meal on a household-local calendar date (YYYY-MM-DD, sent by the browser).
+-- An unscheduled meal is on the week's menu without a day yet; its date is
+-- that week's Monday.
 CREATE TABLE IF NOT EXISTS planned_meals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT NOT NULL,
+    unscheduled INTEGER NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'cook' CHECK (kind IN ('cook', 'leftovers', 'flexible')),
     recipe_id INTEGER REFERENCES recipes(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
@@ -75,6 +78,25 @@ CREATE TABLE IF NOT EXISTS planned_meals (
 );
 
 CREATE INDEX IF NOT EXISTS planned_meals_date ON planned_meals(date);
+
+CREATE TABLE IF NOT EXISTS kids (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- One lunch per kid per household-local school day: packed from home or
+-- bought at school, with what they picked.
+CREATE TABLE IF NOT EXISTS kid_lunches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kid_id INTEGER NOT NULL REFERENCES kids(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('home', 'school')),
+    choice TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (kid_id, date)
+);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

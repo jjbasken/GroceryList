@@ -852,9 +852,11 @@
 
     function renderMealStrip(meals, today) {
         mealStrip.textContent = "";
-        if (!meals.length) { mealStrip.hidden = true; return; }
+        // Week-menu meals have no day yet, so they don't lead the strip.
+        const onDays = meals.filter(m => !m.unscheduled);
+        if (!onDays.length) { mealStrip.hidden = true; return; }
 
-        const first = meals[0];
+        const first = onDays[0];
         const summary = document.createElement("a");
         summary.href = "/meals";
         summary.className = "meal-strip-summary";
@@ -863,10 +865,10 @@
         const lead = document.createElement("strong");
         lead.textContent = `${when}: `;
         summary.append(lead, first.title);
-        if (meals.length > 1) {
+        if (onDays.length > 1) {
             const more = document.createElement("span");
             more.className = "meal-strip-more";
-            more.textContent = ` · +${meals.length - 1} more`;
+            more.textContent = ` · +${onDays.length - 1} more`;
             summary.appendChild(more);
         }
         mealStrip.appendChild(summary);

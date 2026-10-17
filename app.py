@@ -221,8 +221,12 @@ def upgrade_db():
         db.execute("INSERT OR IGNORE INTO item_name_history (name) SELECT DISTINCT name FROM items")
 
     # Recipe and meal-planning tables (recipes, recipe_ingredients,
-    # planned_meals) are new and come only from schema.sql, which init_db runs
-    # just before this; there is no older shape of them to migrate.
+    # planned_meals, kids, kid_lunches) come from schema.sql, which init_db
+    # runs just before this. The week menu added one column to planned_meals.
+    meal_cols = {row[1] for row in db.execute("PRAGMA table_info(planned_meals)")}
+    if meal_cols and 'unscheduled' not in meal_cols:
+        db.execute("ALTER TABLE planned_meals ADD COLUMN unscheduled INTEGER NOT NULL DEFAULT 0")
+        db.commit()
 
     # --- Audit log table ---
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1111,6 +1115,10 @@ def delete_recipe(recipe_id):
 # zone the server runs in. Kinds follow MenuPlanner: a "cook" night uses a
 # recipe (and is the only kind whose ingredients go to the list), "leftovers"
 # eats up an earlier cook night, and "flexible" is a loose, easy night.
+#
+# A meal can also sit on the week's menu without a day ("unscheduled"): a pick
+# list of what to make that week. It is stored on the week's Monday so range
+# queries find it, and gets a real date once someone picks a day for it.
 
 MEAL_KINDS = ("cook", "leftovers", "flexible")
 MAX_MEAL_RANGE_DAYS = 42
@@ -1163,6 +1171,13 @@ def _validate_meal(db, data):
     servings = data.get("servings")
     if not _valid_servings(servings, allow_none=True):
         return None, f"Servings must be a whole number from 1 to {MAX_SERVINGS}"
+    unscheduled = data.get("unscheduled", False)
+    if not isinstance(unscheduled, bool):
+        return None, "unscheduled must be true or false"
+    if unscheduled:
+        if kind == "leftovers":
+            return None, "Leftovers need a day"
+        meal_date -= timedelta(days=meal_date.weekday())
 
     recipe_id = data.get("recipe_id")
     recipe = None
@@ -1181,12 +1196,14 @@ def _validate_meal(db, data):
         if type(leftover_of) is not int:
             return None, "Invalid cook night"
         leftover_meal = db.execute(
-            "SELECT id, title, date FROM planned_meals WHERE id = ? AND kind = 'cook'", (leftover_of,)
+            "SELECT id, title, date, unscheduled FROM planned_meals WHERE id = ? AND kind = 'cook'", (leftover_of,)
         ).fetchone()
         if leftover_meal is None:
             return None, "Leftovers must point at a cook night"
         if leftover_meal["date"] > meal_date.isoformat():
             return None, "Leftovers can't come before the meal they're from"
+        if leftover_meal["unscheduled"]:
+            return None, "Pick a day for that cook night first"
 
     if not title:
         if recipe is not None:
@@ -1196,8 +1213,8 @@ def _validate_meal(db, data):
         else:
             return None, "Pick a recipe or type what's for dinner"
     return {
-        "date": meal_date.isoformat(), "kind": kind, "recipe_id": recipe_id, "title": title,
-        "leftover_of": leftover_of, "servings": servings, "notes": notes,
+        "date": meal_date.isoformat(), "unscheduled": int(unscheduled), "kind": kind,
+        "recipe_id": recipe_id, "title": title, "leftover_of": leftover_of, "servings": servings, "notes": notes,
     }, None
 
 
@@ -1210,7 +1227,10 @@ def get_meals():
     days = request.args.get("days", default=7, type=int)
     if not 1 <= days <= MAX_MEAL_RANGE_DAYS:
         return jsonify({"error": f"days must be 1-{MAX_MEAL_RANGE_DAYS}"}), 400
-    end = start + timedelta(days=days - 1)
+    try:
+        end = start + timedelta(days=days - 1)
+    except OverflowError:
+        return jsonify({"error": "Date range exceeds supported dates"}), 400
     rows = _fetch_meals(get_db(), start=start.isoformat(), end=end.isoformat())
     return jsonify([dict(r) for r in rows])
 
@@ -1223,11 +1243,11 @@ def create_meal():
     if error:
         return jsonify({"error": error}), 400
     cur = db.execute(
-        "INSERT INTO planned_meals (date, kind, recipe_id, title, leftover_of, servings, notes, sort, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, "
+        "INSERT INTO planned_meals (date, unscheduled, kind, recipe_id, title, leftover_of, servings, notes, "
+        "sort, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
         "(SELECT COALESCE(MAX(sort), -1) + 1 FROM planned_meals WHERE date = ?), ?)",
-        (fields["date"], fields["kind"], fields["recipe_id"], fields["title"], fields["leftover_of"],
-         fields["servings"], fields["notes"], fields["date"], session["user_id"]),
+        (fields["date"], fields["unscheduled"], fields["kind"], fields["recipe_id"], fields["title"],
+         fields["leftover_of"], fields["servings"], fields["notes"], fields["date"], session["user_id"]),
     )
     db.commit()
     broadcast("update")
@@ -1246,16 +1266,20 @@ def update_meal(meal_id):
         return jsonify({"error": error}), 400
     if fields["leftover_of"] == meal_id:
         return jsonify({"error": "Leftovers must point at a cook night"}), 400
+    if fields["unscheduled"] and db.execute(
+        "SELECT 1 FROM planned_meals WHERE leftover_of = ?", (meal_id,)
+    ).fetchone():
+        return jsonify({"error": "Leftovers are planned from this night — keep it on a day"}), 400
     # Updated in place (not deleted and re-added) so leftovers that point at
     # this cook night keep pointing at it.
     db.execute(
-        "UPDATE planned_meals SET date = ?, kind = ?, recipe_id = ?, title = ?, leftover_of = ?, "
-        "servings = ?, notes = ?, updated_at = datetime('now'), "
+        "UPDATE planned_meals SET date = ?, unscheduled = ?, kind = ?, recipe_id = ?, title = ?, "
+        "leftover_of = ?, servings = ?, notes = ?, updated_at = datetime('now'), "
         "sort = CASE WHEN date = ? THEN sort "
         "ELSE (SELECT COALESCE(MAX(sort), -1) + 1 FROM planned_meals WHERE date = ?) END "
         "WHERE id = ?",
-        (fields["date"], fields["kind"], fields["recipe_id"], fields["title"], fields["leftover_of"],
-         fields["servings"], fields["notes"], fields["date"], fields["date"], meal_id),
+        (fields["date"], fields["unscheduled"], fields["kind"], fields["recipe_id"], fields["title"],
+         fields["leftover_of"], fields["servings"], fields["notes"], fields["date"], fields["date"], meal_id),
     )
     if fields["kind"] != "cook":
         db.execute("UPDATE planned_meals SET leftover_of = NULL WHERE leftover_of = ?", (meal_id,))
@@ -1274,6 +1298,175 @@ def delete_meal(meal_id):
     db.commit()
     broadcast("update")
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Kids' lunches API
+# ---------------------------------------------------------------------------
+#
+# Each kid has at most one lunch per school day: "home" (packed) or "school"
+# (bought), with an optional note of what they chose. Dates are household-
+# local YYYY-MM-DD, like planned meals. Clearing a day deletes its row.
+
+LUNCH_KINDS = ("home", "school")
+MAX_KIDS = 20
+
+
+def _validate_kid_name(data):
+    if not isinstance(data, dict) or not isinstance(data.get("name"), str):
+        return None, "Name is required"
+    name = data["name"].strip()
+    if not name:
+        return None, "Name is required"
+    if len(name) > 50:
+        return None, "Name too long"
+    return name, None
+
+
+@app.route("/api/kids")
+@login_required
+def get_kids():
+    rows = get_db().execute("SELECT id, name FROM kids ORDER BY sort, id").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/kids", methods=["POST"])
+@login_required
+def create_kid():
+    name, error = _validate_kid_name(request.get_json(silent=True))
+    if error:
+        return jsonify({"error": error}), 400
+    db = get_db()
+    if db.execute("SELECT COUNT(*) FROM kids").fetchone()[0] >= MAX_KIDS:
+        return jsonify({"error": f"Up to {MAX_KIDS} kids"}), 400
+    cur = db.execute(
+        "INSERT INTO kids (name, sort) VALUES (?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM kids))", (name,)
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({"id": cur.lastrowid, "name": name}), 201
+
+
+@app.route("/api/kids/<int:kid_id>", methods=["PUT"])
+@login_required
+def update_kid(kid_id):
+    name, error = _validate_kid_name(request.get_json(silent=True))
+    if error:
+        return jsonify({"error": error}), 400
+    db = get_db()
+    if db.execute("UPDATE kids SET name = ? WHERE id = ?", (name, kid_id)).rowcount == 0:
+        return jsonify({"error": "Kid not found"}), 404
+    db.commit()
+    broadcast("update")
+    return jsonify({"id": kid_id, "name": name})
+
+
+@app.route("/api/kids/<int:kid_id>", methods=["DELETE"])
+@login_required
+def delete_kid(kid_id):
+    db = get_db()
+    if db.execute("DELETE FROM kids WHERE id = ?", (kid_id,)).rowcount == 0:
+        return jsonify({"error": "Kid not found"}), 404
+    db.commit()
+    broadcast("update")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lunches")
+@login_required
+def get_lunches():
+    start = _parse_iso_date(request.args.get("start"))
+    if start is None:
+        return jsonify({"error": "start must be YYYY-MM-DD"}), 400
+    days = request.args.get("days", default=7, type=int)
+    if not 1 <= days <= MAX_MEAL_RANGE_DAYS:
+        return jsonify({"error": f"days must be 1-{MAX_MEAL_RANGE_DAYS}"}), 400
+    try:
+        end = start + timedelta(days=days - 1)
+    except OverflowError:
+        return jsonify({"error": "Date range exceeds supported dates"}), 400
+    rows = get_db().execute(
+        "SELECT kid_id, date, kind, choice FROM kid_lunches WHERE date >= ? AND date <= ? ORDER BY date, kid_id",
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/lunches", methods=["PUT"])
+@login_required
+def set_lunch():
+    """Set (or, with kind null, clear) one kid's lunch on one day."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid format"}), 400
+    db = get_db()
+    kid_id = data.get("kid_id")
+    if type(kid_id) is not int or db.execute("SELECT 1 FROM kids WHERE id = ?", (kid_id,)).fetchone() is None:
+        return jsonify({"error": "Kid not found"}), 404
+    lunch_date = _parse_iso_date(data.get("date"))
+    if lunch_date is None:
+        return jsonify({"error": "Date must be YYYY-MM-DD"}), 400
+    if lunch_date.weekday() >= 5:
+        return jsonify({"error": "Lunches must be on a school day (Monday to Friday)"}), 400
+    if "kind" not in data:
+        return jsonify({"error": "kind is required (use null to clear a lunch)"}), 400
+    kind = data["kind"]
+    if kind is None:
+        db.execute("DELETE FROM kid_lunches WHERE kid_id = ? AND date = ?", (kid_id, lunch_date.isoformat()))
+        db.commit()
+        broadcast("update")
+        return jsonify({"ok": True})
+    if kind not in LUNCH_KINDS:
+        return jsonify({"error": "Lunch must be home or school"}), 400
+    choice = data.get("choice")
+    if choice is not None and not isinstance(choice, str):
+        return jsonify({"error": "choice must be a string"}), 400
+    choice = (choice or "").strip() or None
+    if choice and len(choice) > 200:
+        return jsonify({"error": "Lunch choice too long"}), 400
+    db.execute(
+        "INSERT INTO kid_lunches (kid_id, date, kind, choice) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (kid_id, date) DO UPDATE SET kind = excluded.kind, choice = excluded.choice, "
+        "updated_at = datetime('now')",
+        (kid_id, lunch_date.isoformat(), kind, choice),
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({"kid_id": kid_id, "date": lunch_date.isoformat(), "kind": kind, "choice": choice})
+
+
+@app.route("/api/lunches/copy-week", methods=["POST"])
+@login_required
+def copy_lunch_week():
+    """Copy one week's lunches onto another, filling only days not yet set."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid format"}), 400
+    source = _parse_iso_date(data.get("from"))
+    target = _parse_iso_date(data.get("to"))
+    if source is None or target is None:
+        return jsonify({"error": "from and to must be YYYY-MM-DD"}), 400
+    # Weeks run Monday through Friday, regardless of the supplied day.
+    source -= timedelta(days=source.weekday())
+    target -= timedelta(days=target.weekday())
+    try:
+        source_end = source + timedelta(days=4)
+        target + timedelta(days=4)
+    except OverflowError:
+        return jsonify({"error": "Week exceeds supported dates"}), 400
+    shift = (target - source).days
+    if shift == 0:
+        return jsonify({"error": "Pick a different week"}), 400
+    db = get_db()
+    cur = db.execute(
+        "INSERT OR IGNORE INTO kid_lunches (kid_id, date, kind, choice) "
+        "SELECT kid_id, date(date, ? || ' days'), kind, choice FROM kid_lunches "
+        "WHERE date >= ? AND date <= ?",
+        (f"{shift:+d}", source.isoformat(), source_end.isoformat()),
+    )
+    db.commit()
+    broadcast("update")
+    return jsonify({"copied": cur.rowcount})
 
 
 # ---------------------------------------------------------------------------

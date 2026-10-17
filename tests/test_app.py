@@ -1732,6 +1732,136 @@ class TestMealsAPI:
         assert db_count(app, "SELECT COUNT(*) FROM planned_meals") == 0
 
 
+class TestWeekMenu:
+    def test_unscheduled_meal_lands_on_week_monday(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/meals", {"date": "2026-10-15", "title": "Tacos", "unscheduled": True})
+        assert rv.status_code == 201
+        meal = rv.get_json()
+        assert (meal["date"], meal["unscheduled"]) == ("2026-10-12", 1)
+        rows = client.get("/api/meals?start=2026-10-12&days=7").get_json()
+        assert [(m["title"], m["unscheduled"]) for m in rows] == [("Tacos", 1)]
+
+    def test_picking_a_day_schedules_it(self, client):
+        make_user()
+        do_login(client)
+        meal = jpost(client, "/api/meals", {"date": "2026-10-12", "title": "Tacos", "unscheduled": True}).get_json()
+        rv = jput(client, f"/api/meals/{meal['id']}", {"date": "2026-10-16", "title": "Tacos", "unscheduled": False})
+        assert rv.status_code == 200
+        assert (rv.get_json()["date"], rv.get_json()["unscheduled"]) == ("2026-10-16", 0)
+
+    def test_leftovers_cannot_be_unscheduled(self, client):
+        make_user()
+        do_login(client)
+        rv = jpost(client, "/api/meals", {"date": "2026-10-12", "title": "X", "kind": "leftovers", "unscheduled": True})
+        assert rv.status_code == 400
+
+    def test_leftovers_need_a_scheduled_cook_night(self, client):
+        make_user()
+        do_login(client)
+        cook = jpost(client, "/api/meals", {"date": "2026-10-12", "title": "Chili", "unscheduled": True}).get_json()
+        rv = jpost(client, "/api/meals", {"date": "2026-10-14", "kind": "leftovers", "leftover_of": cook["id"]})
+        assert rv.status_code == 400
+
+    def test_cook_night_with_leftovers_stays_on_a_day(self, client):
+        make_user()
+        cook = make_meal("2026-10-13", title="Chili")
+        make_meal("2026-10-15", title="Leftover Chili", kind="leftovers", leftover_of=cook)
+        do_login(client)
+        rv = jput(client, f"/api/meals/{cook}", {"date": "2026-10-13", "title": "Chili", "unscheduled": True})
+        assert rv.status_code == 400
+
+    def test_rejects_non_boolean(self, client):
+        make_user()
+        do_login(client)
+        assert jpost(client, "/api/meals", {"date": "2026-10-12", "title": "X", "unscheduled": "yes"}).status_code == 400
+
+    def test_upgrade_adds_column_to_old_table(self, app):
+        with app.app_context():
+            db = get_db()
+            db.execute("DROP TABLE planned_meals")
+            db.execute("CREATE TABLE planned_meals (id INTEGER PRIMARY KEY, date TEXT NOT NULL, "
+                       "kind TEXT NOT NULL DEFAULT 'cook', recipe_id INTEGER, title TEXT NOT NULL, "
+                       "leftover_of INTEGER, servings INTEGER, notes TEXT, sort INTEGER NOT NULL DEFAULT 0, "
+                       "added_to_list_id INTEGER, added_to_list_at TEXT, created_by INTEGER, "
+                       "created_at TEXT, updated_at TEXT)")
+            db.execute("INSERT INTO planned_meals (date, title) VALUES ('2026-10-12', 'Old')")
+            db.commit()
+        upgrade_db()
+        assert db_query(app, "SELECT unscheduled FROM planned_meals")["unscheduled"] == 0
+
+
+class TestKidsAndLunches:
+    def test_requires_auth(self, client):
+        assert client.get("/api/kids").status_code == 401
+        assert client.get("/api/lunches?start=2026-10-12").status_code == 401
+
+    def test_kid_crud(self, client, app):
+        make_user()
+        do_login(client)
+        a = jpost(client, "/api/kids", {"name": " Ava "}).get_json()
+        jpost(client, "/api/kids", {"name": "Ben"})
+        assert a["name"] == "Ava"
+        assert [k["name"] for k in client.get("/api/kids").get_json()] == ["Ava", "Ben"]
+        assert jput(client, f"/api/kids/{a['id']}", {"name": "Avery"}).status_code == 200
+        assert jpost(client, "/api/kids", {"name": "  "}).status_code == 400
+        assert jput(client, "/api/kids/99999", {"name": "X"}).status_code == 404
+        assert client.delete(f"/api/kids/{a['id']}").status_code == 200
+        assert [k["name"] for k in client.get("/api/kids").get_json()] == ["Ben"]
+
+    def test_set_update_and_clear_lunch(self, client, app):
+        make_user()
+        do_login(client)
+        kid = jpost(client, "/api/kids", {"name": "Ava"}).get_json()["id"]
+        rv = jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-13", "kind": "school", "choice": "Pizza"})
+        assert rv.status_code == 200
+        jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-13", "kind": "home", "choice": "PB&J"})
+        rows = client.get("/api/lunches?start=2026-10-12&days=7").get_json()
+        assert rows == [{"kid_id": kid, "date": "2026-10-13", "kind": "home", "choice": "PB&J"}]
+        assert jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-13", "kind": None}).status_code == 200
+        assert db_count(app, "SELECT COUNT(*) FROM kid_lunches") == 0
+
+    @pytest.mark.parametrize("payload", [
+        {"date": "2026-02-30", "kind": "home"},
+        {"date": "2026-10-13", "kind": "cafeteria"},
+        {"date": "2026-10-13", "kind": "home", "choice": "x" * 201},
+        {"date": "2026-10-13", "kind": "home", "choice": 5},
+    ])
+    def test_set_lunch_rejects_invalid(self, client, payload):
+        make_user()
+        do_login(client)
+        kid = jpost(client, "/api/kids", {"name": "Ava"}).get_json()["id"]
+        assert jput(client, "/api/lunches", dict(payload, kid_id=kid)).status_code == 400
+
+    def test_set_lunch_unknown_kid(self, client):
+        make_user()
+        do_login(client)
+        assert jput(client, "/api/lunches", {"kid_id": 99999, "date": "2026-10-13", "kind": "home"}).status_code == 404
+
+    def test_deleting_kid_removes_lunches(self, client, app):
+        make_user()
+        do_login(client)
+        kid = jpost(client, "/api/kids", {"name": "Ava"}).get_json()["id"]
+        jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-13", "kind": "home"})
+        client.delete(f"/api/kids/{kid}")
+        assert db_count(app, "SELECT COUNT(*) FROM kid_lunches") == 0
+
+    def test_copy_week_fills_only_unset_days(self, client):
+        make_user()
+        do_login(client)
+        kid = jpost(client, "/api/kids", {"name": "Ava"}).get_json()["id"]
+        jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-12", "kind": "school", "choice": "Pizza"})
+        jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-13", "kind": "home"})
+        jput(client, "/api/lunches", {"kid_id": kid, "date": "2026-10-20", "kind": "school", "choice": "Tacos"})
+        rv = jpost(client, "/api/lunches/copy-week", {"from": "2026-10-12", "to": "2026-10-19"})
+        assert rv.get_json() == {"copied": 1}
+        rows = client.get("/api/lunches?start=2026-10-19&days=7").get_json()
+        assert [(r["date"], r["kind"], r["choice"]) for r in rows] == [
+            ("2026-10-19", "school", "Pizza"), ("2026-10-20", "school", "Tacos"),
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Adding recipe ingredients to a list
 # ---------------------------------------------------------------------------
@@ -2093,3 +2223,63 @@ class TestRecipeUrlImport:
              patch("app.anthropic.Anthropic", return_value=fake_client):
             rv = jpost(client, "/api/recipes/extract-url", {"url": "http://example.com/page"})
         assert rv.status_code == 422
+
+
+class TestLunchReviewRegressions:
+    def test_missing_kind_does_not_clear_saved_lunch(self, client):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        payload = {'kid_id': kid, 'date': '2026-10-12', 'kind': 'home', 'choice': 'Sandwich'}
+        assert jput(client, '/api/lunches', payload).status_code == 200
+        assert jput(client, '/api/lunches', {'kid_id': kid, 'date': payload['date']}).status_code == 400
+        assert client.get('/api/lunches?start=2026-10-12').get_json()[0]['choice'] == 'Sandwich'
+
+    @pytest.mark.parametrize('day', ['2026-10-17', '2026-10-18'])
+    def test_rejects_invisible_weekend_lunches(self, client, day):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        assert jput(client, '/api/lunches', {'kid_id': kid, 'date': day, 'kind': 'home'}).status_code == 400
+        assert client.get('/api/lunches?start=2026-10-12').get_json() == []
+
+    def test_copy_normalizes_week_and_preserves_weekdays(self, client):
+        make_user()
+        do_login(client)
+        kid = jpost(client, '/api/kids', {'name': 'Ava'}).get_json()['id']
+        jput(client, '/api/lunches', {'kid_id': kid, 'date': '2026-10-12', 'kind': 'school'})
+        rv = jpost(client, '/api/lunches/copy-week', {'from': '2026-10-14', 'to': '2026-10-23'})
+        assert rv.get_json() == {'copied': 1}
+        assert client.get('/api/lunches?start=2026-10-19').get_json() == [
+            {'kid_id': kid, 'date': '2026-10-19', 'kind': 'school', 'choice': None}]
+        assert jpost(client, '/api/lunches/copy-week', {'from': '2026-10-12', 'to': '2026-10-16'}).status_code == 400
+
+    @pytest.mark.parametrize('endpoint', ['meals', 'lunches'])
+    def test_date_range_overflow_is_client_error(self, client, endpoint):
+        make_user()
+        do_login(client)
+        assert client.get(f'/api/{endpoint}?start=9999-12-31&days=7').status_code == 400
+        assert client.get(f'/api/{endpoint}?start=9999-12-31&days=1').status_code == 200
+
+
+@pytest.mark.parametrize('method,path', [
+    ('get', '/api/kids'), ('post', '/api/kids'),
+    ('put', '/api/kids/1'), ('delete', '/api/kids/1'),
+    ('get', '/api/lunches?start=2026-10-12'), ('put', '/api/lunches'),
+    ('post', '/api/lunches/copy-week'),
+])
+def test_lunch_endpoints_require_authentication(client, method, path):
+    assert getattr(client, method)(path, json={}).status_code == 401
+
+
+@pytest.mark.parametrize('method,path', [
+    ('post', '/api/kids'), ('put', '/api/kids/1'), ('delete', '/api/kids/1'),
+    ('put', '/api/lunches'), ('post', '/api/lunches/copy-week'),
+])
+def test_lunch_writes_require_csrf(client, app, method, path):
+    make_user()
+    do_login(client)
+    with patch.dict(app.config, WTF_CSRF_ENABLED=True):
+        rv = getattr(client, method)(path, json={})
+    assert rv.status_code == 400
+    assert rv.get_json()['error'] == 'csrf'

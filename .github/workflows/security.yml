@@ -63,8 +63,8 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Run service-worker security tests
-        run: node tests/offline-security.test.js
+      - name: Run browser regression and service-worker security tests
+        run: node --test tests/*.test.js
 
       - name: Build the production container
         run: docker build --tag grocery-list:security-check .
