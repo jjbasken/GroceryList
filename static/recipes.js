@@ -482,9 +482,11 @@
         }
 
         async function useJsonText(text) {
+            // AI assistants often wrap replies in ```json fences despite being told not to.
+            const fenced = text.trim().match(/^```[a-z]*\s*([\s\S]*?)\s*```$/i);
             let parsed;
             try {
-                parsed = JSON.parse(text);
+                parsed = JSON.parse(fenced ? fenced[1] : text);
             } catch (e) {
                 showImportError("That is not valid JSON");
                 return;
