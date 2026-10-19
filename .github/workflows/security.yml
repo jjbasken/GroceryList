@@ -69,6 +69,46 @@ jobs:
       - name: Build the production container
         run: docker build --tag grocery-list:security-check .
 
+  publish-image:
+    # Only images from master that passed every check reach the registry.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [secret-scan, test-and-scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/grocerylist
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build the production container
+        run: |
+          IMAGE="${IMAGE,,}"
+          docker build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            --tag "${IMAGE}:latest" \
+            .
+
+      - name: Push image tags
+        run: |
+          IMAGE="${IMAGE,,}"
+          docker push "${IMAGE}:sha-${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
