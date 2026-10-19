@@ -66,7 +66,13 @@ Keep ingredients, servings, and cooking steps together, then review ingredients 
 
 ### Run with Docker Compose
 
-1. Clone the repo and create a `.env` file:
+Production runs the prebuilt image that CI publishes to GitHub Container
+Registry (`ghcr.io/jjbasken/grocerylist`) after every push to `master` that
+passes the security checks. The server only needs `docker-compose.yml`, `.env`,
+and the `data/` directory; a full source checkout is not required.
+
+1. Copy `docker-compose.yml` to the server (or clone the repo) and create a
+   `.env` file:
 
    ```
    SECRET_KEY=your-random-secret-key-here
@@ -88,6 +94,7 @@ Keep ingredients, servings, and cooking steps together, then review ingredients 
 
    ```bash
    mkdir -p data
+   docker compose pull
    docker compose up -d
    ```
 
@@ -105,6 +112,29 @@ HTTP requests to HTTPS. For loopback-only development without the tunnel, set
 `http://localhost:5000`.
 
 Data is persisted in the `./data/` directory on the host.
+
+### Updating production
+
+Once a change is merged to `master` and the `publish-image` job finishes, pull
+the new image and recreate the container:
+
+```bash
+docker compose pull web
+docker compose up -d
+```
+
+Each build is tagged `latest` and `sha-<full commit hash>`. To pin a specific
+build or roll back, set `IMAGE_TAG=sha-<commit>` in `.env` and run the same two
+commands. Remove `IMAGE_TAG` to follow `latest` again. Old images can be cleaned
+up with `docker image prune`.
+
+GHCR packages start out private. To let the server pull without logging in, set
+the `grocerylist` package to public once, under **Package settings → Change
+visibility** on GitHub. Otherwise run `docker login ghcr.io` on the server with
+a personal access token that has only the `read:packages` scope.
+
+To test local changes in the container, build from source instead:
+`docker compose up -d --build`.
 
 ### Run Locally (no Docker)
 
@@ -205,7 +235,7 @@ changing an `.in` file, regenerate its `.txt` with
 `pip-compile --generate-hashes --allow-unsafe --strip-extras <file>.in`
 (Dependabot does this automatically for its update PRs). GitHub Actions runs tests,
 dependency auditing, Bandit, a full-history secret scan, and a production
-container build. Dependabot checks Python, Docker, and GitHub Actions inputs
+container build, and publishes the image to GHCR from `master`. Dependabot checks Python, Docker, and GitHub Actions inputs
 weekly.
 
 ## Pull requests and security

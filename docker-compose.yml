@@ -1,5 +1,8 @@
 services:
   web:
+    # Published by CI from master. Override IMAGE_TAG with a sha-<commit> tag
+    # to pin or roll back; `docker compose build` still builds from source.
+    image: ghcr.io/jjbasken/grocerylist:${IMAGE_TAG:-latest}
     build: .
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
